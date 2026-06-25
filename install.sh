@@ -22,7 +22,7 @@ else
   success "Homebrew already installed"
 fi
 
-PACKAGES=(awscli fzf jq)
+PACKAGES=(fzf jq)
 for pkg in "${PACKAGES[@]}"; do
   if brew list "$pkg" &>/dev/null; then
     success "$pkg already installed"
@@ -32,6 +32,16 @@ for pkg in "${PACKAGES[@]}"; do
     success "$pkg installed"
   fi
 done
+
+if command -v aws &>/dev/null && aws --version 2>&1 | grep -q "exe/"; then
+  success "AWS CLI v2 already installed"
+else
+  info "Installing AWS CLI v2..."
+  curl -fsSL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/AWSCLIV2.pkg
+  sudo installer -pkg /tmp/AWSCLIV2.pkg -target /
+  rm /tmp/AWSCLIV2.pkg
+  success "AWS CLI v2 installed"
+fi
 
 CASK="session-manager-plugin"
 if brew list --cask "$CASK" &>/dev/null; then
