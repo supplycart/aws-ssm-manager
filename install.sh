@@ -74,6 +74,5 @@ EOF
   success "ssm function added"
 fi
 
-source "$ZSHRC"
 echo ""
-success "All done. Fill in ~/.ssm/config.json with your environments."
+success "All done. Run 'source ~/.zshrc' to activate ssm, then fill in ~/.ssm/config.json."
