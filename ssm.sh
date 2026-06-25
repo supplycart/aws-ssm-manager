@@ -17,7 +17,7 @@ load_config() {
   jq -r ".[\"$1\"][\"$2\"]" "$CONFIG_FILE"
 }
 
-list_environments() {
+list_accounts() {
   jq -r 'keys[]' "$CONFIG_FILE"
 }
 
@@ -69,31 +69,31 @@ find_free_port() {
 }
 
 get_db_port() {
-  local env="$1" db_identifier="$2"
+  local account="$1" db_identifier="$2"
   local port
-  port=$(jq -r ".[\"$env\"].databases[\"$db_identifier\"] // empty" "$CONFIG_FILE")
+  port=$(jq -r ".[\"$account\"].databases[\"$db_identifier\"] // empty" "$CONFIG_FILE")
   if [[ -z "$port" ]]; then
     port=$(find_free_port 15432)
     local updated
-    updated=$(jq ".[\"$env\"].databases[\"$db_identifier\"] = $port" "$CONFIG_FILE")
+    updated=$(jq ".[\"$account\"].databases[\"$db_identifier\"] = $port" "$CONFIG_FILE")
     echo "$updated" > "$CONFIG_FILE"
     echo "Assigned port $port to $db_identifier" >&2
   fi
   echo "$port"
 }
 
-pick_environment() {
-  local envs=()
+pick_account() {
+  local accounts=()
   while IFS= read -r line; do
-    [[ -n "$line" ]] && envs+=("$line")
-  done < <(list_environments)
+    [[ -n "$line" ]] && accounts+=("$line")
+  done < <(list_accounts)
 
-  if [[ ${#envs[@]} -eq 0 ]]; then
-    echo "No environments found in $CONFIG_FILE" >&2
+  if [[ ${#accounts[@]} -eq 0 ]]; then
+    echo "No accounts found in $CONFIG_FILE" >&2
     exit 1
   fi
 
-  select_menu "Select environment:" "${envs[@]}"
+  select_menu "Select account:" "${accounts[@]}"
 }
 
 pick_app() {
@@ -139,11 +139,11 @@ pick_instance() {
 }
 
 cmd_ssh() {
-  local ENV PROFILE REGION APP INSTANCE_ID
+  local ACCOUNT PROFILE REGION APP INSTANCE_ID
 
-  ENV=$(pick_environment)
-  PROFILE=$(load_config "$ENV" "profile")
-  REGION=$(load_config "$ENV" "region")
+  ACCOUNT=$(pick_account)
+  PROFILE=$(load_config "$ACCOUNT" "profile")
+  REGION=$(load_config "$ACCOUNT" "region")
   APP=$(pick_app "$PROFILE" "$REGION")
   INSTANCE_ID=$(pick_instance "$PROFILE" "$REGION" "$APP")
 
@@ -158,13 +158,13 @@ cmd_ssh() {
 }
 
 cmd_db() {
-  local ENV PROFILE REGION APP
+  local ACCOUNT PROFILE REGION APP
   local DB_IDENTIFIER RDS_HOST LOCAL_PORT
   local INSTANCE_ID DB_ALIAS
 
-  ENV=$(pick_environment)
-  PROFILE=$(load_config "$ENV" "profile")
-  REGION=$(load_config "$ENV" "region")
+  ACCOUNT=$(pick_account)
+  PROFILE=$(load_config "$ACCOUNT" "profile")
+  REGION=$(load_config "$ACCOUNT" "region")
   APP=$(pick_app "$PROFILE" "$REGION")
 
   echo "Fetching RDS instances for $APP..." >&2
@@ -189,7 +189,7 @@ cmd_db() {
   DB_IDENTIFIER=$(echo "$selected_rds" | awk '{print $1}')
   RDS_HOST=$(echo "$selected_rds" | awk '{print $2}')
   RDS_PORT=$(echo "$selected_rds" | awk '{print $3}')
-  LOCAL_PORT=$(get_db_port "$ENV" "$DB_IDENTIFIER")
+  LOCAL_PORT=$(get_db_port "$ACCOUNT" "$DB_IDENTIFIER")
 
   echo "Fetching jump-host for $APP..." >&2
   INSTANCE_ID=$(list_instances "$PROFILE" "$REGION" "$APP" | awk 'NR==1{print $1}')
@@ -229,30 +229,78 @@ cmd_db() {
     --parameters "$params"
 }
 
+cmd_config() {
+  local action
+  action=$(select_menu "Config action:" "view" "add" "edit")
+  [[ -z "$action" ]] && exit 0
+
+  case "$action" in
+    view)  config_view ;;
+    add)   config_add ;;
+    edit)  config_edit ;;
+  esac
+}
+
+config_view() {
+  jq '.' "$CONFIG_FILE"
+}
+
+config_add() {
+  local name profile region
+  read -r -p "Account name: " name
+  [[ -z "$name" ]] && { echo "Aborted." >&2; return; }
+  read -r -p "AWS profile: " profile
+  read -r -p "AWS region: " region
+
+  local updated
+  updated=$(jq ".[\"$name\"] = {\"profile\": \"$profile\", \"region\": \"$region\", \"databases\": {}}" "$CONFIG_FILE")
+  echo "$updated" > "$CONFIG_FILE"
+  echo "Account '$name' added."
+}
+
+config_edit() {
+  local account field current value updated
+
+  account=$(pick_account)
+  [[ -z "$account" ]] && exit 0
+
+  field=$(select_menu "Select field to edit:" "profile" "region")
+  [[ -z "$field" ]] && exit 0
+
+  current=$(load_config "$account" "$field")
+  read -r -p "$field [$current]: " value
+  value="${value:-$current}"
+
+  updated=$(jq ".[\"$account\"][\"$field\"] = \"$value\"" "$CONFIG_FILE")
+  echo "$updated" > "$CONFIG_FILE"
+  echo "Updated $account.$field → '$value'."
+}
+
 cmd_help() {
   cat <<'EOF'
 
 USAGE
-  ssm ssh    — SSH into an EC2 instance via SSM
-  ssm db     — Open an RDS tunnel via SSM port forwarding
+  ssm ssh      — SSH into an EC2 instance via SSM
+  ssm db       — Open an RDS tunnel via SSM port forwarding
+  ssm config   — View, add, or edit AWS account profiles
 
 DEPENDENCIES
   brew install fzf jq
 
 CONFIG FILE
-  commands/config.json — maps environment names to AWS CLI profiles and regions.
-  Copy config.example.json to config.json and fill in your values.
-  DB port assignments are auto-saved here on first use (do not commit this file).
+  ~/.ssm/config.json — maps account names to AWS CLI profiles and regions.
+  DB port assignments are auto-saved here on first use.
 
 EOF
 }
 
 case "$COMMAND" in
-  ssh)  cmd_ssh ;;
-  db)   cmd_db ;;
-  help) cmd_help ;;
+  ssh)    cmd_ssh ;;
+  db)     cmd_db ;;
+  config) cmd_config ;;
+  help)   cmd_help ;;
   *)
-    echo "Usage: ssm [ssh|db|help]"
+    echo "Usage: ssm [ssh|db|config|help]"
     exit 1
     ;;
 esac
