@@ -1,0 +1,12 @@
+{
+  "staging": {
+    "profile": "your-staging-aws-profile",
+    "region": "ap-southeast-5",
+    "databases": {}
+  },
+  "production": {
+    "profile": "your-production-aws-profile",
+    "region": "ap-southeast-5",
+    "databases": {}
+  }
+}
