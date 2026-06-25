@@ -1,7 +1,6 @@
 #!/bin/bash
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="$SCRIPT_DIR/config.json"
+CONFIG_FILE="$HOME/.ssm/config.json"
 COMMAND="$1"
 
 if ! command -v fzf &>/dev/null; then

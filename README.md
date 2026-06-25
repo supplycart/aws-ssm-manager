@@ -13,17 +13,21 @@ An interactive CLI tool for connecting to AWS EC2 instances and RDS databases vi
 
 ## Prerequisites
 
-### 1. Install dependencies
+### 1. Install
 
 ```bash
-bash commands/install.sh
+curl -fsSL https://cdn.supplycart.my/shells/install.sh | bash
 ```
 
-This installs `awscli`, `fzf`, `jq`, and the AWS Session Manager plugin via Homebrew (installing Homebrew itself if needed).
+This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and adds the `ssm` function to your `~/.zshrc`. Then reload your shell:
+
+```bash
+source ~/.zshrc
+```
 
 ### 2. Configure AWS CLI profiles
 
-Ensure your `~/.aws/credentials` and `~/.aws/config` have profiles matching the environments in `config.json`:
+Ensure your `~/.aws/credentials` and `~/.aws/config` have profiles matching the environments in `~/.ssm/config.json`:
 
 ```ini
 # ~/.aws/config
@@ -34,29 +38,20 @@ region = ap-southeast-5
 region = ap-southeast-5
 ```
 
-### 3. Set up config.json
+### 3. Set up config
 
-Copy the example config and fill in your values:
+Edit `~/.ssm/config.json` (created automatically by the install script) with your AWS profile names and region:
 
-```bash
-cp commands/config.example.json commands/config.json
+```json
+{
+  "staging": {
+    "profile": "your-staging-profile",
+    "region": "ap-southeast-5"
+  }
+}
 ```
 
-Edit `config.json` with your AWS profile names and region. The `databases` object is auto-populated on first use — do not commit `config.json`.
-
-### 4. Add the alias to your shell
-
-Add this to your `~/.zshrc`:
-
-```zsh
-alias ssm="<path-to-repo>/commands/ssm.sh"
-```
-
-Then reload:
-
-```bash
-source ~/.zshrc
-```
+The `databases` object is auto-populated on first use.
 
 ## Usage
 
@@ -148,7 +143,7 @@ Target EC2 instances must have the `AmazonSSMManagedInstanceCore` policy attache
 
 ## Config File Reference
 
-`config.json` structure:
+`~/.ssm/config.json` structure:
 
 ```json
 {

@@ -42,5 +42,38 @@ else
   success "$CASK installed"
 fi
 
+SSM_DIR="$HOME/.ssm"
+SSM_SCRIPT="$SSM_DIR/ssm.sh"
+CONFIG_FILE="$SSM_DIR/config.json"
+ZSHRC="$HOME/.zshrc"
+
+[[ ! -d "$SSM_DIR" ]] && mkdir -p "$SSM_DIR"
+
+info "Downloading ssm.sh..."
+curl -fsSL https://cdn.supplycart.my/shells/ssm.sh -o "$SSM_SCRIPT"
+chmod +x "$SSM_SCRIPT"
+success "ssm.sh downloaded to $SSM_SCRIPT"
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+  echo '{}' > "$CONFIG_FILE"
+  success "Created $CONFIG_FILE — fill in your environments before using ssm"
+fi
+
+FUNCTION_MARKER="# ssm — AWS SSM helper"
+if grep -qF "$FUNCTION_MARKER" "$ZSHRC" 2>/dev/null; then
+  success "ssm function already in $ZSHRC"
+else
+  info "Adding ssm function to $ZSHRC..."
+  cat >> "$ZSHRC" <<EOF
+
+$FUNCTION_MARKER
+ssm() {
+  bash "$SSM_SCRIPT" "\$@"
+}
+EOF
+  success "ssm function added"
+fi
+
+source "$ZSHRC"
 echo ""
-success "All dependencies installed. Follow the remaining setup steps in commands/README.md."
+success "All done. Fill in ~/.ssm/config.json with your environments."
