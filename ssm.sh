@@ -299,9 +299,6 @@ USAGE
   ssm config   — View, add, or edit AWS account profiles
   ssm update   — Replace this script with the latest version from CDN
 
-DEPENDENCIES
-  brew install fzf jq
-
 CONFIG FILE
   ~/.ssm/config.json — maps account names to AWS CLI profiles and regions.
   DB port assignments are auto-saved here on first use.
