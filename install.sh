@@ -55,7 +55,6 @@ fi
 SSM_DIR="$HOME/.ssm"
 SSM_SCRIPT="$SSM_DIR/ssm.sh"
 CONFIG_FILE="$SSM_DIR/config.json"
-ZSHRC="$HOME/.zshrc"
 
 [[ ! -d "$SSM_DIR" ]] && mkdir -p "$SSM_DIR"
 
@@ -69,20 +68,14 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
   success "Created $CONFIG_FILE — fill in your environments before using ssm"
 fi
 
-FUNCTION_MARKER="# ssm — AWS SSM helper"
-if grep -qF "$FUNCTION_MARKER" "$ZSHRC" 2>/dev/null; then
-  success "ssm function already in $ZSHRC"
+SYMLINK="/usr/local/bin/ssm"
+if [[ -L "$SYMLINK" && "$(readlink "$SYMLINK")" == "$SSM_SCRIPT" ]]; then
+  success "ssm symlink already in place"
 else
-  info "Adding ssm function to $ZSHRC..."
-  cat >> "$ZSHRC" <<EOF
-
-$FUNCTION_MARKER
-ssm() {
-  bash "$SSM_SCRIPT" "\$@"
-}
-EOF
-  success "ssm function added"
+  info "Creating symlink $SYMLINK -> $SSM_SCRIPT..."
+  sudo ln -sf "$SSM_SCRIPT" "$SYMLINK"
+  success "ssm command installed"
 fi
 
 echo ""
-success "All done. Run 'source ~/.zshrc' to activate ssm, then fill in ~/.ssm/config.json."
+success "All done. Fill in ~/.ssm/config.json, then run 'ssm help'."

@@ -20,11 +20,7 @@ An interactive CLI tool for connecting to AWS EC2 instances and RDS databases vi
 curl -fsSL https://cdn.supplycart.my/shells/install.sh | bash
 ```
 
-This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and adds the `ssm` function to your `~/.zshrc`. Then reload your shell:
-
-```bash
-source ~/.zshrc
-```
+This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and creates a symlink at `/usr/local/bin/ssm` pointing to `~/.ssm/ssm.sh`. The `ssm` command is available immediately in any new shell — no `source ~/.zshrc` needed.
 
 ### 2. Configure
 
