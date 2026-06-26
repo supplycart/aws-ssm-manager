@@ -247,6 +247,7 @@ aws_profile_configure() {
   aws configure set aws_access_key_id     "$key"    --profile "$profile"
   aws configure set aws_secret_access_key "$secret" --profile "$profile"
   aws configure set region                "$region" --profile "$profile"
+  aws configure set output                "json"    --profile "$profile"
 }
 
 config_view() {
