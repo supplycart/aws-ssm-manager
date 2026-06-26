@@ -276,6 +276,20 @@ config_edit() {
   echo "Updated $account.$field → '$value'."
 }
 
+cmd_update() {
+  local SSM_SCRIPT="$HOME/.ssm/ssm.sh"
+  local CDN_URL="https://cdn.supplycart.my/shells/ssm.sh"
+
+  echo "Downloading latest ssm.sh from CDN..."
+  if curl -fsSL "$CDN_URL" -o "$SSM_SCRIPT"; then
+    chmod +x "$SSM_SCRIPT"
+    echo "ssm updated successfully."
+  else
+    echo "Update failed. Could not download from $CDN_URL" >&2
+    exit 1
+  fi
+}
+
 cmd_help() {
   cat <<'EOF'
 
@@ -283,6 +297,7 @@ USAGE
   ssm ssh      — SSH into an EC2 instance via SSM
   ssm db       — Open an RDS tunnel via SSM port forwarding
   ssm config   — View, add, or edit AWS account profiles
+  ssm update   — Replace this script with the latest version from CDN
 
 DEPENDENCIES
   brew install fzf jq
@@ -298,9 +313,10 @@ case "$COMMAND" in
   ssh)    cmd_ssh ;;
   db)     cmd_db ;;
   config) cmd_config ;;
+  update) cmd_update ;;
   help)   cmd_help ;;
   *)
-    echo "Usage: ssm [ssh|db|config|help]"
+    echo "Usage: ssm [ssh|db|config|update|help]"
     exit 1
     ;;
 esac
