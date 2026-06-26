@@ -231,18 +231,42 @@ cmd_db() {
 
 cmd_config() {
   local action
-  action=$(select_menu "Config action:" "view" "add" "edit")
+  action=$(select_menu "Config action:" "view" "add" "edit" "delete")
   [[ -z "$action" ]] && exit 0
 
   case "$action" in
-    view)  config_view ;;
-    add)   config_add ;;
-    edit)  config_edit ;;
+    view)   config_view ;;
+    add)    config_add ;;
+    edit)   config_edit ;;
+    delete) config_delete ;;
   esac
+}
+
+aws_profile_configure() {
+  local profile="$1" key="$2" secret="$3" region="$4"
+  aws configure set aws_access_key_id     "$key"    --profile "$profile"
+  aws configure set aws_secret_access_key "$secret" --profile "$profile"
+  aws configure set region                "$region" --profile "$profile"
 }
 
 config_view() {
   jq '.' "$CONFIG_FILE"
+
+  echo ""
+  echo "AWS CLI profiles:"
+  while IFS= read -r account; do
+    local profile key masked cli_region
+    profile=$(load_config "$account" "profile")
+    key=$(aws configure get aws_access_key_id --profile "$profile" 2>/dev/null)
+    cli_region=$(aws configure get region --profile "$profile" 2>/dev/null)
+    if [[ -n "$key" ]]; then
+      masked="${key:0:4}****${key: -4}"
+    else
+      masked="(not set)"
+    fi
+    printf "  %-20s profile=%-20s key=%-16s region=%s\n" \
+      "$account" "$profile" "$masked" "${cli_region:-(not set)}"
+  done < <(list_accounts)
 }
 
 config_add() {
@@ -256,24 +280,93 @@ config_add() {
   updated=$(jq ".[\"$name\"] = {\"profile\": \"$profile\", \"region\": \"$region\", \"databases\": {}}" "$CONFIG_FILE")
   echo "$updated" > "$CONFIG_FILE"
   echo "Account '$name' added."
+
+  read -r -p "Set up AWS CLI credentials for profile '$profile'? [y/N]: " setup
+  if [[ "$setup" == "y" || "$setup" == "Y" ]]; then
+    local key secret
+    read -r -p "Access Key ID: " key
+    read -r -s -p "Secret Access Key: " secret
+    echo ""
+    aws_profile_configure "$profile" "$key" "$secret" "$region"
+    echo "AWS CLI profile '$profile' configured."
+  fi
+}
+
+config_delete() {
+  local account updated
+  account=$(pick_account)
+  [[ -z "$account" ]] && exit 0
+
+  read -r -p "Delete account '$account'? [y/N]: " confirm
+  [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Aborted." >&2; return; }
+
+  local profile
+  profile=$(load_config "$account" "profile")
+
+  updated=$(jq "del(.[\"$account\"])" "$CONFIG_FILE")
+  echo "$updated" > "$CONFIG_FILE"
+  echo "Account '$account' deleted."
+
+  read -r -p "Also delete AWS CLI profile '$profile'? [y/N]: " del_profile
+  if [[ "$del_profile" == "y" || "$del_profile" == "Y" ]]; then
+    python3 - "$profile" <<'EOF'
+import configparser, os, sys
+profile = sys.argv[1]
+
+for path, section in [
+  (os.path.expanduser("~/.aws/credentials"), profile),
+  (os.path.expanduser("~/.aws/config"),      f"profile {profile}"),
+]:
+  if not os.path.exists(path):
+    continue
+  c = configparser.ConfigParser()
+  c.read(path)
+  if c.remove_section(section):
+    with open(path, "w") as f:
+      c.write(f)
+EOF
+    echo "AWS CLI profile '$profile' removed."
+  fi
 }
 
 config_edit() {
-  local account field current value updated
+  local account field profile
 
   account=$(pick_account)
   [[ -z "$account" ]] && exit 0
 
-  field=$(select_menu "Select field to edit:" "profile" "region")
+  field=$(select_menu "Select field to edit:" "profile" "region" "aws-access-key" "aws-secret-key")
   [[ -z "$field" ]] && exit 0
 
-  current=$(load_config "$account" "$field")
-  read -r -p "$field [$current]: " value
-  value="${value:-$current}"
+  profile=$(load_config "$account" "profile")
 
-  updated=$(jq ".[\"$account\"][\"$field\"] = \"$value\"" "$CONFIG_FILE")
-  echo "$updated" > "$CONFIG_FILE"
-  echo "Updated $account.$field → '$value'."
+  case "$field" in
+    profile|region)
+      local current value updated
+      current=$(load_config "$account" "$field")
+      read -r -p "$field [$current]: " value
+      value="${value:-$current}"
+      updated=$(jq ".[\"$account\"][\"$field\"] = \"$value\"" "$CONFIG_FILE")
+      echo "$updated" > "$CONFIG_FILE"
+      echo "Updated $account.$field → '$value'."
+      ;;
+    aws-access-key)
+      local current value
+      current=$(aws configure get aws_access_key_id --profile "$profile" 2>/dev/null)
+      read -r -p "Access Key ID [${current:-not set}]: " value
+      value="${value:-$current}"
+      aws configure set aws_access_key_id "$value" --profile "$profile"
+      echo "Updated AWS access key for profile '$profile'."
+      ;;
+    aws-secret-key)
+      local value
+      read -r -s -p "New Secret Access Key: " value
+      echo ""
+      [[ -z "$value" ]] && { echo "Aborted." >&2; return; }
+      aws configure set aws_secret_access_key "$value" --profile "$profile"
+      echo "Updated AWS secret key for profile '$profile'."
+      ;;
+  esac
 }
 
 cmd_update() {

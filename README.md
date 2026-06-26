@@ -7,6 +7,7 @@ An interactive CLI tool for connecting to AWS EC2 instances and RDS databases vi
 - Interactive environment, application, and instance selection using arrow keys
 - SSH into any EC2 instance via SSM
 - Open RDS tunnels via SSM port forwarding (supports PostgreSQL, MySQL, and any engine)
+- Manage AWS account profiles and CLI credentials via `ssm config`
 - Auto-discovers apps and instances from EC2/RDS `App` tags
 - Stable local ports per database — configure your DB client once
 - Temporary `/etc/hosts` alias while the DB tunnel is active (e.g. `sc-staging-adam-rds.tunnel`)
@@ -25,40 +26,26 @@ This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and adds th
 source ~/.zshrc
 ```
 
-### 2. Configure AWS CLI profiles
+### 2. Configure
 
-Ensure your `~/.aws/credentials` and `~/.aws/config` have profiles matching the environments in `~/.ssm/config.json`:
+Run the interactive config command to add your first account. It will write to both `~/.ssm/config.json` and `~/.aws/credentials`:
 
-```ini
-# ~/.aws/config
-[profile your-staging-profile]
-region = ap-southeast-5
-
-[profile your-production-profile]
-region = ap-southeast-5
+```bash
+ssm config
+# → add → enter account name, AWS profile name, region
+# → prompted to set AWS access key ID and secret
 ```
 
-### 3. Set up config
-
-Edit `~/.ssm/config.json` (created automatically by the install script) with your AWS profile names and region:
-
-```json
-{
-  "staging": {
-    "profile": "your-staging-profile",
-    "region": "ap-southeast-5"
-  }
-}
-```
-
-The `databases` object is auto-populated on first use.
+The `databases` object in `~/.ssm/config.json` is auto-populated on first `ssm db` use.
 
 ## Usage
 
 ```bash
-ssm ssh    # SSH into an EC2 instance
-ssm db     # Open an RDS tunnel
-ssm help   # Show usage and config info
+ssm ssh      # SSH into an EC2 instance
+ssm db       # Open an RDS tunnel
+ssm config   # Manage account profiles and AWS credentials
+ssm update   # Update ssm to the latest version
+ssm help     # Show usage and config info
 ```
 
 ### ssm ssh
@@ -77,6 +64,30 @@ ssm help   # Show usage and config info
 5. A temporary hostname alias (`<db-identifier>.tunnel`) is added to `/etc/hosts`
 6. Tunnel opens — connect your DB client to `<db-identifier>.tunnel:<port>`
 7. On exit (Ctrl+C), the `/etc/hosts` entry is removed automatically
+
+### ssm config
+
+Interactive menu with four actions:
+
+| Action | Description |
+|--------|-------------|
+| `view` | Print `~/.ssm/config.json` and show masked AWS key IDs per account |
+| `add` | Add a new account entry and optionally configure its AWS CLI credentials |
+| `edit` | Edit `profile`, `region`, `aws-access-key`, or `aws-secret-key` for an account |
+| `delete` | Remove an account and optionally delete the linked AWS CLI profile |
+
+**add** prompts for:
+- Account name (key in `~/.ssm/config.json`)
+- AWS CLI profile name
+- AWS region
+- Access Key ID and Secret Access Key (optional — skippable)
+
+**edit** field options:
+- `profile` / `region` — updates `~/.ssm/config.json`
+- `aws-access-key` — updates `~/.aws/credentials` via `aws configure set`
+- `aws-secret-key` — updates `~/.aws/credentials` (input is hidden)
+
+**delete** removes the account from `~/.ssm/config.json` and optionally strips the AWS CLI profile from `~/.aws/credentials` and `~/.aws/config`.
 
 ## AWS Requirements
 
@@ -157,4 +168,4 @@ Target EC2 instances must have the `AmazonSSMManagedInstanceCore` policy attache
 }
 ```
 
-`databases` is managed automatically — ports are assigned on first use and reused on subsequent runs.
+`databases` is managed automatically — ports are assigned on first use and reused on subsequent runs. All other fields are managed via `ssm config`.
