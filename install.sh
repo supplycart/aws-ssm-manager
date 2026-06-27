@@ -17,6 +17,20 @@ if [[ "$(uname)" != "Darwin" ]]; then
   error "This script only supports macOS."
 fi
 
+if [[ ! -t 0 ]]; then
+  if [[ -r /dev/tty ]]; then
+    exec < /dev/tty
+  else
+    error "No TTY available. Run via: bash <(curl -fsSL https://cdn.supplycart.my/shells/install.sh)"
+  fi
+fi
+
+info "Requesting sudo credentials upfront (needed for installer + symlink)..."
+sudo -v
+( while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) 2>/dev/null &
+SUDO_KEEPALIVE_PID=$!
+trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+
 if [[ "$(uname -m)" == "arm64" ]]; then
   BREW_PREFIX="/opt/homebrew"
 else
