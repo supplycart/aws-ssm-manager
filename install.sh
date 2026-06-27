@@ -18,18 +18,24 @@ if [[ "$(uname)" != "Darwin" ]]; then
 fi
 
 if [[ ! -t 0 ]]; then
-  if [[ -r /dev/tty ]]; then
-    exec < /dev/tty
-  else
-    error "No TTY available. Run via: bash <(curl -fsSL https://cdn.supplycart.my/shells/install.sh)"
-  fi
+  error "stdin is not a terminal — this almost always means you ran 'curl ... | bash'.
+That pattern breaks sudo prompts. Re-run with one of:
+  bash <(curl -fsSL https://cdn.supplycart.my/shells/install.sh)
+  curl -fsSL https://cdn.supplycart.my/shells/install.sh -o /tmp/install.sh && bash /tmp/install.sh"
 fi
 
-info "Requesting sudo credentials upfront (needed for installer + symlink)..."
-sudo -v
-( while true; do sudo -n true; sleep 50; kill -0 "$$" 2>/dev/null || exit; done ) 2>/dev/null &
-SUDO_KEEPALIVE_PID=$!
-trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
+info "Requesting sudo password (used for installer + symlink — asked once, reused)..."
+read -rsp "Password: " SUDO_PASSWORD
+echo ""
+if ! sudo -S -v <<< "$SUDO_PASSWORD" 2>/dev/null; then
+  error "Incorrect sudo password."
+fi
+
+run_sudo() {
+  sudo -S -p "" "$@" <<< "$SUDO_PASSWORD"
+}
+
+trap 'unset SUDO_PASSWORD' EXIT
 
 if [[ "$(uname -m)" == "arm64" ]]; then
   BREW_PREFIX="/opt/homebrew"
@@ -72,30 +78,37 @@ if command -v aws &>/dev/null && aws --version 2>&1 | grep -q "exe/"; then
 else
   info "Installing AWS CLI v2..."
   curl -fsSL "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/AWSCLIV2.pkg
-  sudo installer -pkg /tmp/AWSCLIV2.pkg -target /
+  run_sudo installer -verbose -pkg /tmp/AWSCLIV2.pkg -target /
   rm /tmp/AWSCLIV2.pkg
   success "AWS CLI v2 installed"
-fi
-
-CASK="session-manager-plugin"
-if brew list --cask "$CASK" &>/dev/null; then
-  success "$CASK already installed"
-else
-  info "Installing $CASK..."
-  brew install --cask "$CASK"
-  success "$CASK installed"
 fi
 
 PLUGIN_BIN="/usr/local/bin/session-manager-plugin"
 PLUGIN_REAL="/usr/local/sessionmanagerplugin/bin/session-manager-plugin"
 
 if [[ -x "$PLUGIN_BIN" || -x "$PLUGIN_REAL" ]]; then
-  success "session-manager-plugin installed at $([[ -x $PLUGIN_BIN ]] && echo $PLUGIN_BIN || echo $PLUGIN_REAL)"
-  if ! command -v session-manager-plugin &>/dev/null; then
-    warn "/usr/local/bin not on PATH for this shell — AWS CLI will still find the plugin by absolute path, but you may want to add /usr/local/bin to PATH in your shell profile."
-  fi
+  success "session-manager-plugin already installed at $([[ -x $PLUGIN_BIN ]] && echo $PLUGIN_BIN || echo $PLUGIN_REAL)"
 else
-  error "session-manager-plugin not found at $PLUGIN_BIN or $PLUGIN_REAL after install. Try: brew reinstall --cask session-manager-plugin"
+  if [[ "$(uname -m)" == "arm64" ]]; then
+    BUNDLE_URL="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/mac_arm64/sessionmanager-bundle.zip"
+  else
+    BUNDLE_URL="https://s3.amazonaws.com/session-manager-downloads/plugin/latest/mac/sessionmanager-bundle.zip"
+  fi
+  info "Installing session-manager-plugin from AWS bundle..."
+  BUNDLE_DIR=$(mktemp -d)
+  curl -fsSL "$BUNDLE_URL" -o "$BUNDLE_DIR/sessionmanager-bundle.zip"
+  unzip -q "$BUNDLE_DIR/sessionmanager-bundle.zip" -d "$BUNDLE_DIR"
+  run_sudo "$BUNDLE_DIR/sessionmanager-bundle/install" -i /usr/local/sessionmanagerplugin -b /usr/local/bin/session-manager-plugin
+  rm -rf "$BUNDLE_DIR"
+  if [[ -x "$PLUGIN_BIN" || -x "$PLUGIN_REAL" ]]; then
+    success "session-manager-plugin installed"
+  else
+    error "session-manager-plugin install completed but binary not found at $PLUGIN_BIN or $PLUGIN_REAL"
+  fi
+fi
+
+if ! command -v session-manager-plugin &>/dev/null; then
+  warn "/usr/local/bin not on PATH for this shell — AWS CLI will still find the plugin by absolute path."
 fi
 
 SSM_DIR="$HOME/.ssm"
@@ -116,13 +129,13 @@ fi
 
 SYMLINK="/usr/local/bin/ssm"
 if [[ ! -d /usr/local/bin ]]; then
-  sudo mkdir -p /usr/local/bin
+  run_sudo mkdir -p /usr/local/bin
 fi
 if [[ -L "$SYMLINK" && "$(readlink "$SYMLINK")" == "$SSM_SCRIPT" ]]; then
   success "ssm symlink already in place"
 else
   info "Creating symlink $SYMLINK -> $SSM_SCRIPT..."
-  sudo ln -sf "$SSM_SCRIPT" "$SYMLINK"
+  run_sudo ln -sf "$SSM_SCRIPT" "$SYMLINK"
   success "ssm command installed"
 fi
 
