@@ -72,15 +72,16 @@ else
   success "$CASK installed"
 fi
 
-if ! command -v session-manager-plugin &>/dev/null; then
-  warn "session-manager-plugin not found on PATH after install — refreshing shell env"
-  load_brew_env
-fi
+PLUGIN_BIN="/usr/local/bin/session-manager-plugin"
+PLUGIN_REAL="/usr/local/sessionmanagerplugin/bin/session-manager-plugin"
 
-if command -v session-manager-plugin &>/dev/null; then
-  success "session-manager-plugin resolvable: $(command -v session-manager-plugin)"
+if [[ -x "$PLUGIN_BIN" || -x "$PLUGIN_REAL" ]]; then
+  success "session-manager-plugin installed at $([[ -x $PLUGIN_BIN ]] && echo $PLUGIN_BIN || echo $PLUGIN_REAL)"
+  if ! command -v session-manager-plugin &>/dev/null; then
+    warn "/usr/local/bin not on PATH for this shell — AWS CLI will still find the plugin by absolute path, but you may want to add /usr/local/bin to PATH in your shell profile."
+  fi
 else
-  error "session-manager-plugin still not on PATH. Open a new terminal and re-run, or add: eval \"\$($BREW_PREFIX/bin/brew shellenv)\" to your shell profile."
+  error "session-manager-plugin not found at $PLUGIN_BIN or $PLUGIN_REAL after install. Try: brew reinstall --cask session-manager-plugin"
 fi
 
 SSM_DIR="$HOME/.ssm"
