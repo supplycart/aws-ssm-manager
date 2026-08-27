@@ -165,3 +165,24 @@ Target EC2 instances must have the `AmazonSSMManagedInstanceCore` policy attache
 ```
 
 `databases` is managed automatically — ports are assigned on first use and reused on subsequent runs. All other fields are managed via `ssm config`.
+
+## Development
+
+This repository is the source of truth for the `ssm` CLI. It previously lived in
+[`supplycart/devops`](https://github.com/supplycart/devops) under `commands/`.
+
+Pushes to `master` trigger `.github/workflows/deploy.yml`, which syncs `install.sh` and `ssm.sh`
+to the `supplycart-cdn` R2 bucket under `shells/` — the paths that
+`https://cdn.supplycart.my/shells/…` serves. Those URLs are hard-coded in `install.sh` and in
+`ssm update`, so changing them breaks every existing install.
+
+Publishing requires a `Production` environment on this repo with the variables
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secret
+`CLOUDFLARE_R2_CDN_SECRET`.
+
+To verify a release reached the CDN:
+
+```bash
+curl -fsSL https://cdn.supplycart.my/shells/ssm.sh | shasum
+shasum ssm.sh   # must match
+```
