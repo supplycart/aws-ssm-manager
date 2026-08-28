@@ -1,11 +1,13 @@
 # SSM Command
 
-An interactive CLI tool for connecting to AWS EC2 instances and RDS databases via AWS Systems Manager (SSM), without needing a bastion host or open SSH ports.
+An interactive CLI tool for connecting to AWS EC2 instances, ECS containers, and RDS databases via AWS Systems Manager (SSM), without needing a bastion host or open SSH ports.
 
 ## Features
 
 - Interactive environment, application, and instance selection using arrow keys
 - SSH into any EC2 instance via SSM
+- Detects ECS container instances and offers the host shell or a container shell
+- Shell into ECS and Fargate containers via ECS Exec
 - Open RDS tunnels via SSM port forwarding (supports PostgreSQL, MySQL, and any engine)
 - Manage AWS account profiles and CLI credentials via `ssm config`
 - Auto-discovers apps and instances from EC2/RDS `App` tags
@@ -37,7 +39,7 @@ The `databases` object in `~/.ssm/config.json` is auto-populated on first `ssm d
 ## Usage
 
 ```bash
-ssm ssh      # SSH into an EC2 instance
+ssm ssh      # Shell into an EC2 instance or an ECS/Fargate container
 ssm db       # Open an RDS tunnel
 ssm config   # Manage account profiles and AWS credentials
 ssm update   # Update ssm to the latest version
@@ -47,9 +49,19 @@ ssm help     # Show usage and config info
 ### ssm ssh
 
 1. Select environment
-2. Select application (discovered from EC2 `App` tag)
-3. Select instance (auto-selected if only one)
-4. Drops into an SSM shell session as `ubuntu`
+2. Select application (discovered from the `App` tag on EC2 instances and ECS services)
+3. If the app has both EC2 instances and ECS services, choose which to connect to
+4. Select instance or container (auto-selected if only one)
+5. Drops into an SSM shell session as `ubuntu`, or into the container via ECS Exec
+
+**ECS detection.** After you pick an EC2 instance, `ssm ssh` checks whether it is registered
+as an ECS container instance. If it is, you are told which cluster it belongs to and asked
+whether you want the host shell (`sudo su - ubuntu`, as before) or a shell inside one of the
+containers running on it. A plain EC2 instance is unaffected — same menus, same shell, no
+extra prompt.
+
+**Fargate.** Fargate services have no EC2 instance, so they never appeared in the app list
+before. They are now discovered from their `App` tag and reachable through ECS Exec.
 
 ### ssm db
 
@@ -108,6 +120,21 @@ Attach the following policy to the IAM user or role:
       "Resource": "*"
     },
     {
+      "Sid": "ECSDiscoverAndExec",
+      "Effect": "Allow",
+      "Action": [
+        "ecs:ListClusters",
+        "ecs:ListServices",
+        "ecs:ListTasks",
+        "ecs:ListContainerInstances",
+        "ecs:DescribeServices",
+        "ecs:DescribeTasks",
+        "ecs:ExecuteCommand",
+        "tag:GetResources"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SSMStartSession",
       "Effect": "Allow",
       "Action": [
@@ -140,6 +167,12 @@ EC2 instances must have:
 |-----|-------|
 | `App` | app name (e.g. `adam`, `eva`, `hub`) |
 
+### ECS Tags
+
+ECS **services** must carry the same `App` tag as EC2 instances. Discovery uses the Resource
+Groups Tagging API (`tag:GetResources`) for speed; without that permission the tool falls
+back to enumerating clusters and services, which is slower but needs no extra IAM.
+
 ### RDS Tags
 
 RDS instances must have the same `App` tag as their corresponding EC2 instances.
@@ -147,6 +180,14 @@ RDS instances must have the same `App` tag as their corresponding EC2 instances.
 ### EC2 Instance Profile
 
 Target EC2 instances must have the `AmazonSSMManagedInstanceCore` policy attached to their instance profile, and the SSM agent must be running.
+
+### ECS Exec
+
+To shell into a container, the ECS service must be deployed with `enableExecuteCommand` and
+its **task role** must allow `ssmmessages:CreateControlChannel`, `ssmmessages:CreateDataChannel`,
+`ssmmessages:OpenControlChannel` and `ssmmessages:OpenDataChannel`. If exec is not enabled,
+`ssm ssh` says so and prints the `aws ecs update-service` command that turns it on rather
+than failing with a raw AWS error.
 
 ## Config File Reference
 

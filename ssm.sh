@@ -58,6 +58,277 @@ list_rds_instances() {
     --output text
 }
 
+# ---------------------------------------------------------------------------
+# ECS support. Everything below is additive: on an account with no ECS these
+# helpers return nothing and every EC2 code path behaves exactly as before.
+# ---------------------------------------------------------------------------
+
+# Populated once per run by discover_ecs_services. One "cluster<TAB>service<TAB>app"
+# line per App-tagged ECS service. Empty when the account has no ECS.
+ECS_SERVICES=""
+ECS_DISCOVERY_DONE=""
+
+discover_ecs_services_slow() {
+  local profile="$1" region="$2"
+  local clusters cluster services batch
+
+  clusters=$(aws ecs list-clusters \
+    --profile "$profile" \
+    --region "$region" \
+    --query 'clusterArns[]' \
+    --output text 2>/dev/null | tr '\t' '\n')
+  [[ -z "$clusters" ]] && return 0
+
+  while IFS= read -r cluster; do
+    [[ -z "$cluster" || "$cluster" == "None" ]] && continue
+
+    services=$(aws ecs list-services \
+      --profile "$profile" \
+      --region "$region" \
+      --cluster "$cluster" \
+      --query 'serviceArns[]' \
+      --output text 2>/dev/null | tr '\t' '\n' | grep -v -e '^$' -e '^None$')
+    [[ -z "$services" ]] && continue
+
+    # describe-services takes at most 10 services per call.
+    while IFS= read -r batch; do
+      [[ -z "$batch" ]] && continue
+      aws ecs describe-services \
+        --profile "$profile" \
+        --region "$region" \
+        --cluster "$cluster" \
+        --services $batch \
+        --include TAGS \
+        --query 'services[].[clusterArn, serviceName, tags[?key==`App`].value|[0]]' \
+        --output text 2>/dev/null \
+        | awk -F'\t' '$3 != "" && $3 != "None" { n = split($1, p, "/"); print p[n] "\t" $2 "\t" $3 }'
+    done < <(echo "$services" | xargs -n 10)
+  done <<< "$clusters"
+}
+
+discover_ecs_services() {
+  local profile="$1" region="$2"
+  [[ -n "$ECS_DISCOVERY_DONE" ]] && return 0
+  ECS_DISCOVERY_DONE=1
+
+  # Fast path: one call to the Resource Groups Tagging API. Service ARNs are
+  # arn:aws:ecs:<region>:<acct>:service/<cluster>/<service>, so cluster and
+  # service both fall out of the ARN.
+  local raw rc
+  raw=$(aws resourcegroupstaggingapi get-resources \
+    --profile "$profile" \
+    --region "$region" \
+    --tag-filters Key=App \
+    --resource-type-filters ecs:service \
+    --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`App`].Value|[0]]' \
+    --output text 2>/dev/null)
+  rc=$?
+
+  if [[ $rc -eq 0 ]]; then
+    ECS_SERVICES=$(echo "$raw" | awk -F'\t' '
+      $2 != "" && $2 != "None" {
+        n = split($1, p, "/")
+        if (n >= 3) print p[n-1] "\t" p[n] "\t" $2
+      }')
+    return 0
+  fi
+
+  # Slower fallback for accounts without tag:GetResources. Stay silent unless it
+  # actually turned something up, so a pure-EC2 account sees no new output.
+  ECS_SERVICES=$(discover_ecs_services_slow "$profile" "$region")
+  [[ -n "$ECS_SERVICES" ]] && \
+    echo "Note: tagging API unavailable, enumerated ECS services instead." >&2
+  return 0
+}
+
+list_ecs_apps() {
+  [[ -z "$ECS_SERVICES" ]] && return 0
+  echo "$ECS_SERVICES" | awk -F'\t' 'NF >= 3 { print $3 }'
+}
+
+ecs_services_for_app() {
+  local app="$1"
+  [[ -z "$ECS_SERVICES" ]] && return 0
+  echo "$ECS_SERVICES" | awk -F'\t' -v app="$app" '$3 == app { print $1 "\t" $2 }'
+}
+
+# Is this EC2 instance registered as an ECS container instance? Echoes
+# "cluster<TAB>containerInstanceArn" on a hit and nothing on a miss. A missing
+# ECS policy is treated as a miss so it can never block an EC2 login.
+detect_ecs_container_instance() {
+  local profile="$1" region="$2" instance_id="$3"
+  local clusters cluster arn
+
+  clusters=$(aws ecs list-clusters \
+    --profile "$profile" \
+    --region "$region" \
+    --query 'clusterArns[]' \
+    --output text 2>/dev/null | tr '\t' '\n')
+  [[ -z "$clusters" ]] && return 0
+
+  while IFS= read -r cluster; do
+    [[ -z "$cluster" || "$cluster" == "None" ]] && continue
+    arn=$(aws ecs list-container-instances \
+      --profile "$profile" \
+      --region "$region" \
+      --cluster "$cluster" \
+      --filter "ec2InstanceId == '$instance_id'" \
+      --query 'containerInstanceArns[0]' \
+      --output text 2>/dev/null)
+    if [[ -n "$arn" && "$arn" != "None" ]]; then
+      printf '%s\t%s\n' "${cluster##*/}" "$arn"
+      return 0
+    fi
+  done <<< "$clusters"
+}
+
+# One row per running container:
+#   taskId<TAB>container<TAB>launchType<TAB>exec:on|exec:off<TAB>cluster
+list_ecs_task_rows() {
+  local profile="$1" region="$2" cluster="$3"
+  shift 3
+  [[ $# -eq 0 ]] && return 0
+
+  aws ecs describe-tasks \
+    --profile "$profile" \
+    --region "$region" \
+    --cluster "$cluster" \
+    --tasks "$@" \
+    --query 'tasks[?lastStatus==`RUNNING`].[taskArn, launchType, enableExecuteCommand, containers[].name]' \
+    --output json 2>/dev/null \
+    | jq -r --arg cluster "$cluster" '
+        .[] | . as $t
+        | ($t[0] | split("/") | last) as $id
+        | $t[3][]
+        | [$id, ., ($t[1] // "-"), (if $t[2] then "exec:on" else "exec:off" end), $cluster]
+        | @tsv'
+}
+
+ecs_exec() {
+  local profile="$1" region="$2" cluster="$3" task="$4" container="$5"
+
+  if ! command -v session-manager-plugin &>/dev/null; then
+    echo "Error: session-manager-plugin is required for ECS Exec." >&2
+    echo "Re-run the installer to add it: bash install.sh" >&2
+    exit 1
+  fi
+
+  echo "" >&2
+  echo "Connecting to container $container in task $task via ECS Exec ..."
+  if ! aws ecs execute-command \
+    --profile "$profile" \
+    --region "$region" \
+    --cluster "$cluster" \
+    --task "$task" \
+    --container "$container" \
+    --interactive \
+    --command "/bin/bash"; then
+    echo "" >&2
+    echo "Retrying with /bin/sh ..." >&2
+    aws ecs execute-command \
+      --profile "$profile" \
+      --region "$region" \
+      --cluster "$cluster" \
+      --task "$task" \
+      --container "$container" \
+      --interactive \
+      --command "/bin/sh"
+  fi
+}
+
+ecs_pick_and_exec() {
+  local profile="$1" region="$2"
+  shift 2
+  local rows=("$@")
+
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    echo "No running ECS tasks found." >&2
+    exit 1
+  fi
+
+  local selected
+  if [[ ${#rows[@]} -eq 1 ]]; then
+    selected="${rows[0]}"
+    echo "Auto-selecting: $selected" >&2
+  else
+    selected=$(select_menu "Select container:" "${rows[@]}")
+  fi
+  [[ -z "$selected" ]] && exit 0
+
+  local task container exec_flag cluster
+  task=$(echo "$selected" | awk -F'\t' '{print $1}')
+  container=$(echo "$selected" | awk -F'\t' '{print $2}')
+  exec_flag=$(echo "$selected" | awk -F'\t' '{print $4}')
+  cluster=$(echo "$selected" | awk -F'\t' '{print $5}')
+
+  if [[ "$exec_flag" == "exec:off" ]]; then
+    echo "" >&2
+    echo "ECS Exec is not enabled for this task." >&2
+    echo "Enable it on the service and redeploy:" >&2
+    echo "  aws ecs update-service --cluster $cluster --service <service> \\" >&2
+    echo "    --enable-execute-command --force-new-deployment" >&2
+    echo "" >&2
+    echo "The task role also needs ssmmessages:CreateControlChannel," >&2
+    echo "CreateDataChannel, OpenControlChannel and OpenDataChannel." >&2
+    exit 1
+  fi
+
+  ecs_exec "$profile" "$region" "$cluster" "$task" "$container"
+}
+
+# Fargate / service path: every running task of the app's ECS services.
+ssh_ecs_app() {
+  local profile="$1" region="$2" app="$3"
+  echo "Fetching ECS tasks for $app..." >&2
+
+  local rows=() cluster service tasks line
+  while IFS=$'\t' read -r cluster service; do
+    [[ -z "$cluster" || -z "$service" ]] && continue
+    tasks=$(aws ecs list-tasks \
+      --profile "$profile" \
+      --region "$region" \
+      --cluster "$cluster" \
+      --service-name "$service" \
+      --desired-status RUNNING \
+      --query 'taskArns[]' \
+      --output text 2>/dev/null)
+    [[ -z "$tasks" || "$tasks" == "None" ]] && continue
+
+    while IFS= read -r line; do
+      [[ -n "$line" ]] && rows+=("$line")
+    done < <(list_ecs_task_rows "$profile" "$region" "$cluster" $tasks)
+  done < <(ecs_services_for_app "$app")
+
+  ecs_pick_and_exec "$profile" "$region" "${rows[@]}"
+}
+
+# ECS-on-EC2 path: the tasks running on one container instance.
+ssh_ecs_container_instance() {
+  local profile="$1" region="$2" cluster="$3" ci_arn="$4"
+  echo "Fetching tasks on this container instance..." >&2
+
+  local tasks rows=() line
+  tasks=$(aws ecs list-tasks \
+    --profile "$profile" \
+    --region "$region" \
+    --cluster "$cluster" \
+    --container-instance "$ci_arn" \
+    --desired-status RUNNING \
+    --query 'taskArns[]' \
+    --output text 2>/dev/null)
+
+  if [[ -z "$tasks" || "$tasks" == "None" ]]; then
+    echo "No running tasks on this container instance." >&2
+    exit 1
+  fi
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && rows+=("$line")
+  done < <(list_ecs_task_rows "$profile" "$region" "$cluster" $tasks)
+
+  ecs_pick_and_exec "$profile" "$region" "${rows[@]}"
+}
+
 find_free_port() {
   local port="$1"
   local used_ports
@@ -103,10 +374,10 @@ pick_app() {
   local apps=()
   while IFS= read -r line; do
     [[ -n "$line" ]] && apps+=("$line")
-  done < <(list_apps "$profile" "$region")
+  done < <({ list_apps "$profile" "$region"; list_ecs_apps; } | sort -u | grep -v -e '^$' -e '^None$')
 
   if [[ ${#apps[@]} -eq 0 ]]; then
-    echo "No running instances with an App tag found." >&2
+    echo "No running instances or ECS services with an App tag found." >&2
     exit 1
   fi
 
@@ -144,8 +415,43 @@ cmd_ssh() {
   ACCOUNT=$(pick_account)
   PROFILE=$(load_config "$ACCOUNT" "profile")
   REGION=$(load_config "$ACCOUNT" "region")
+
+  # Runs in this shell, not a subshell, so pick_app below inherits ECS_SERVICES.
+  discover_ecs_services "$PROFILE" "$REGION"
+
   APP=$(pick_app "$PROFILE" "$REGION")
+
+  # If the app also has ECS services, offer the choice. An app backed only by
+  # EC2 skips this entirely and follows the original flow.
+  if [[ -n "$(ecs_services_for_app "$APP")" ]]; then
+    local target="ECS task"
+    if [[ -n "$(list_instances "$PROFILE" "$REGION" "$APP")" ]]; then
+      target=$(select_menu "Connect to:" "EC2 instance" "ECS task")
+      [[ -z "$target" ]] && exit 0
+    fi
+    if [[ "$target" == "ECS task" ]]; then
+      ssh_ecs_app "$PROFILE" "$REGION" "$APP"
+      return
+    fi
+  fi
+
   INSTANCE_ID=$(pick_instance "$PROFILE" "$REGION" "$APP")
+
+  # Autocheck: is this a plain EC2 box or an ECS container instance?
+  local ecs_node cluster ci_arn shell_choice
+  ecs_node=$(detect_ecs_container_instance "$PROFILE" "$REGION" "$INSTANCE_ID")
+  if [[ -n "$ecs_node" ]]; then
+    cluster=$(echo "$ecs_node" | awk -F'\t' '{print $1}')
+    ci_arn=$(echo "$ecs_node" | awk -F'\t' '{print $2}')
+    echo "" >&2
+    echo "This instance is an ECS container instance in cluster $cluster." >&2
+    shell_choice=$(select_menu "Open which shell?" "Host shell (sudo su - ubuntu)" "Container shell (ECS Exec)")
+    [[ -z "$shell_choice" ]] && exit 0
+    if [[ "$shell_choice" == "Container shell (ECS Exec)" ]]; then
+      ssh_ecs_container_instance "$PROFILE" "$REGION" "$cluster" "$ci_arn"
+      return
+    fi
+  fi
 
   echo "" >&2
   echo "Connecting to $INSTANCE_ID via SSM ..."
@@ -388,7 +694,9 @@ cmd_help() {
   cat <<'EOF'
 
 USAGE
-  ssm ssh      — SSH into an EC2 instance via SSM
+  ssm ssh      — Shell into an EC2 instance, an ECS container instance, or an
+                 ECS/Fargate container. Detects ECS nodes and asks whether you
+                 want the host shell or a container shell.
   ssm db       — Open an RDS tunnel via SSM port forwarding
   ssm config   — View, add, or edit AWS account profiles
   ssm update   — Replace this script with the latest version from CDN
