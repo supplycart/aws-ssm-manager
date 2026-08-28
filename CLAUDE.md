@@ -5,8 +5,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 - `bash install.sh` — install dependencies and symlink `ssm` to `/usr/local/bin/ssm` on macOS
-- `ssm ssh / ssm db / ssm config / ssm update / ssm help` — end-user CLI commands
+- `ssm ssh / ssm pod / ssm db / ssm config / ssm update / ssm help` — end-user CLI commands
 - `bash -n install.sh && bash -n ssm.sh` — syntax check before committing
+- `bash test/args_test.sh` — unit tests for the argument helpers; run with the syntax check
 
 ## Architecture
 
@@ -17,6 +18,23 @@ required). Config lives at `~/.ssm/config.json`. Key internals of `ssm.sh`:
 - `load_config(account, field)` reads from `~/.ssm/config.json` via jq
 - `get_db_port()` auto-assigns and persists local tunnel ports to config
 - All config writes follow the pattern: `updated=$(jq ... "$CONFIG_FILE") && echo "$updated" > "$CONFIG_FILE"`
+
+Every interactive prompt also has a flag that answers it, so a fully flagged command runs without
+stopping (`ssm ssh --env staging --app adam`). Two helpers carry this:
+
+- `parse_args "<value-flags>" "<bool-flags>" "$@"` sets `ARG_<UPPER_SNAKE>` globals and rejects any
+  flag the command didn't declare. Each `cmd_*` calls it first.
+- `resolve_selection <wanted> <label> <context> <prompt> <match-fields> <auto> row...` replaces
+  every `pick_*` body. Empty `<wanted>` means prompt; a value that matches nothing returns 1 after
+  listing the candidates. It returns rather than exits, because callers run it inside `$( )` where
+  an `exit` would only kill the subshell — hence the `|| exit 1` at every call site.
+
+Secrets never come from a flag value: `read_secret_value` takes `SSM_AWS_SECRET_KEY` or one line
+of stdin via `--secret-key -`.
+
+The script targets **bash 3.2** (the macOS system bash): no associative arrays, no `${var^^}`, no
+`mapfile`. The dispatch at the bottom is guarded by `[[ "${BASH_SOURCE[0]}" == "$0" ]]` so the
+tests can source the script without running a command.
 
 ## Distribution
 

@@ -1,10 +1,13 @@
 # SSM Command
 
-An interactive CLI tool for connecting to AWS EC2 instances, ECS containers, EKS pods, and RDS databases — without needing a bastion host or open SSH ports.
+A CLI tool for connecting to AWS EC2 instances, ECS containers, EKS pods, and RDS databases —
+without needing a bastion host or open SSH ports. Interactive by default, fully scriptable with
+flags.
 
 ## Features
 
 - Interactive environment, application, and instance selection using arrow keys
+- Every menu has a flag that replaces it, so a known destination is one command: `ssm ssh --env staging --app adam`
 - SSH into any EC2 instance via SSM
 - Detects ECS container instances and offers the host shell or a container shell
 - Shell into ECS and Fargate containers via ECS Exec
@@ -48,6 +51,46 @@ ssm update   # Update ssm to the latest version
 ssm help     # Show usage and config info
 ```
 
+### Skipping the menus
+
+Every prompt has a flag that answers it. Supply the flags you know and the rest still come up as
+menus, so `ssm ssh` on its own behaves exactly as it always has:
+
+```bash
+ssm ssh                                   # fully interactive
+ssm ssh --env staging                     # skips the account menu
+ssm ssh --env staging --app adam          # no prompts at all if the app has one instance
+ssm ssh --env staging --app adam --container php-fpm
+ssm db  --env staging --app adam --db sc-staging-adam-rds
+ssm pod --env staging -n default --pod api-7d9f
+```
+
+| Command | Flags |
+|---------|-------|
+| all | `--env\|-e <name>` (alias `--account`), `--help\|-h` |
+| `ssh` | `--app <name>`, `--type ec2\|ecs`, `--instance <id\|Name>`, `--container <name>`, `--task <id>`, `--host` |
+| `db` | `--app <name>`, `--db <identifier>`, `--instance <id\|Name>` |
+| `pod` | `--cluster <name>`, `--namespace\|-n <ns>`, `--pod <name>`, `--container\|-c <name>` |
+| `config` | see [ssm config](#ssm-config) |
+
+`--flag value` and `--flag=value` both work. `ssm <command> --help` prints that command's flags.
+
+A value that doesn't exist is an error listing the valid ones — never a re-prompt — so a fully
+flagged command can't stall waiting for input:
+
+```
+$ ssm ssh --env staging --app adm
+Error: no app 'adm' in account staging.
+Available:
+  adam
+  eva
+  hub
+```
+
+Instances match on either their id or their `Name` tag, so `--instance i-0abc123` and
+`--instance web-01` both work. If `--container` matches several running tasks, `ssm` lists them
+and asks you to add `--task <id>`.
+
 ### ssm ssh
 
 1. Select environment
@@ -56,6 +99,12 @@ ssm help     # Show usage and config info
 4. Select instance or container (auto-selected if only one)
 5. Drops into an SSM shell session as `ubuntu`, or into the container via ECS Exec
    (the container shell uses `bash` when the image has it, otherwise `sh`)
+
+Non-interactively: `--env` answers step 1, `--app` step 2, `--type ec2|ecs` step 3, and
+`--instance` or `--container` step 4. `--instance` implies `--type ec2` and `--container`/`--task`
+imply `--type ecs`, so `--type` is only needed to pick the EC2 side without naming an instance.
+On an ECS container instance, `--host` takes the host shell and `--container` takes the container
+shell, which is the "host or container" question below.
 
 **ECS detection.** After you pick an EC2 instance, `ssm ssh` checks whether it is registered
 as an ECS container instance. If it is, you are told which cluster it belongs to and asked
@@ -76,6 +125,8 @@ before. They are now discovered from their `App` tag and reachable through ECS E
 5. Select container (auto-selected if only one)
 6. Drops into the container via `kubectl exec`
 
+Non-interactively: `--env`, `--cluster`, `--namespace`/`-n`, `--pod`, `--container`/`-c`.
+
 Pods are not reachable over SSM at all, so this path uses `kubectl` rather than Session
 Manager — which is why it is a separate command instead of a branch of `ssm ssh`.
 
@@ -92,9 +143,36 @@ Your `~/.kube/config` and your current kubectl context are never touched.
 6. Tunnel opens — connect your DB client to `<db-identifier>.tunnel:<port>`
 7. On exit (Ctrl+C), the `/etc/hosts` entry is removed automatically
 
+Non-interactively: `--env`, `--app`, `--db <identifier>`. The jump host is the first running
+instance of the app; `--instance <id|Name>` picks a different one.
+
 ### ssm config
 
-Interactive menu with four actions:
+Run `ssm config` for the menu, or name the action directly:
+
+```bash
+ssm config view   [--env <name>]
+ssm config add    --env <name> [--profile <p>] [--region <r>]
+                  [--access-key <k>] [--secret-key -] [--skip-credentials]
+ssm config edit   --env <name> [--profile <p>] [--region <r>]
+                  [--access-key <k>] [--secret-key -]
+ssm config delete --env <name> [--yes] [--delete-profile]
+```
+
+`edit` applies every field flag you pass in one go. `delete` still asks for confirmation unless
+you pass `--yes`, and keeps the AWS CLI profile unless you pass `--delete-profile`.
+
+**Secrets are never taken as a flag value** — that would record them in your shell history and
+expose them in `ps`. Pass them one of these two ways instead:
+
+```bash
+SSM_AWS_SECRET_KEY="$SECRET" ssm config add --env staging --profile sc-staging \
+  --region ap-southeast-5 --access-key AKIA...
+
+echo "$SECRET" | ssm config edit --env staging --secret-key -
+```
+
+The four actions:
 
 | Action | Description |
 |--------|-------------|
