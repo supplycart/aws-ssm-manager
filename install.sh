@@ -62,7 +62,7 @@ else
   load_brew_env
 fi
 
-PACKAGES=(fzf jq)
+PACKAGES=(fzf jq kubernetes-cli)
 for pkg in "${PACKAGES[@]}"; do
   if brew list "$pkg" &>/dev/null; then
     success "$pkg already installed"

@@ -1,6 +1,6 @@
 # SSM Command
 
-An interactive CLI tool for connecting to AWS EC2 instances, ECS containers, and RDS databases via AWS Systems Manager (SSM), without needing a bastion host or open SSH ports.
+An interactive CLI tool for connecting to AWS EC2 instances, ECS containers, EKS pods, and RDS databases — without needing a bastion host or open SSH ports.
 
 ## Features
 
@@ -8,6 +8,7 @@ An interactive CLI tool for connecting to AWS EC2 instances, ECS containers, and
 - SSH into any EC2 instance via SSM
 - Detects ECS container instances and offers the host shell or a container shell
 - Shell into ECS and Fargate containers via ECS Exec
+- Shell into EKS pods via `ssm pod` (cluster → namespace → pod → container)
 - Open RDS tunnels via SSM port forwarding (supports PostgreSQL, MySQL, and any engine)
 - Manage AWS account profiles and CLI credentials via `ssm config`
 - Auto-discovers apps and instances from EC2/RDS `App` tags
@@ -40,6 +41,7 @@ The `databases` object in `~/.ssm/config.json` is auto-populated on first `ssm d
 
 ```bash
 ssm ssh      # Shell into an EC2 instance or an ECS/Fargate container
+ssm pod      # Shell into an EKS pod
 ssm db       # Open an RDS tunnel
 ssm config   # Manage account profiles and AWS credentials
 ssm update   # Update ssm to the latest version
@@ -62,6 +64,21 @@ extra prompt.
 
 **Fargate.** Fargate services have no EC2 instance, so they never appeared in the app list
 before. They are now discovered from their `App` tag and reachable through ECS Exec.
+
+### ssm pod
+
+1. Select environment
+2. Select EKS cluster (auto-selected if only one)
+3. Select namespace
+4. Select pod (running pods only)
+5. Select container (auto-selected if only one)
+6. Drops into the container via `kubectl exec`
+
+Pods are not reachable over SSM at all, so this path uses `kubectl` rather than Session
+Manager — which is why it is a separate command instead of a branch of `ssm ssh`.
+
+Credentials are fetched with `aws eks update-kubeconfig` and written to **`~/.ssm/kubeconfig`**.
+Your `~/.kube/config` and your current kubectl context are never touched.
 
 ### ssm db
 
@@ -135,6 +152,15 @@ Attach the following policy to the IAM user or role:
       "Resource": "*"
     },
     {
+      "Sid": "EKSDiscoverAndConnect",
+      "Effect": "Allow",
+      "Action": [
+        "eks:ListClusters",
+        "eks:DescribeCluster"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SSMStartSession",
       "Effect": "Allow",
       "Action": [
@@ -180,6 +206,14 @@ RDS instances must have the same `App` tag as their corresponding EC2 instances.
 ### EC2 Instance Profile
 
 Target EC2 instances must have the `AmazonSSMManagedInstanceCore` policy attached to their instance profile, and the SSM agent must be running.
+
+### EKS Access
+
+`ssm pod` needs `kubectl` (installed by `install.sh`) and IAM permission to describe the
+cluster. Beyond IAM, your principal must also be mapped **inside** the cluster — either as
+an access entry or in the `aws-auth` ConfigMap — with rights to list namespaces and pods
+and to create `pods/exec`. Without that mapping the AWS calls succeed but `kubectl` is
+denied; `ssm pod` reports this rather than failing with a raw error.
 
 ### ECS Exec
 

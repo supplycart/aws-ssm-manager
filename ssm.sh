@@ -463,6 +463,198 @@ cmd_ssh() {
     --parameters '{"command": ["sudo su - ubuntu"]}'
 }
 
+# ---------------------------------------------------------------------------
+# EKS support. Pods are not reachable over SSM at all -- they need kubectl --
+# so this is a separate funnel behind `ssm pod`, not a branch of `ssm ssh`.
+# ---------------------------------------------------------------------------
+
+# Our own kubeconfig, so ~/.kube/config and your current context are never touched.
+KUBECONFIG_FILE="$HOME/.ssm/kubeconfig"
+
+require_kubectl() {
+  if ! command -v kubectl &>/dev/null; then
+    echo "Error: kubectl is required for pod access but is not installed." >&2
+    echo "Install it with: brew install kubernetes-cli" >&2
+    exit 1
+  fi
+}
+
+list_eks_clusters() {
+  local profile="$1" region="$2"
+  aws eks list-clusters \
+    --profile "$profile" \
+    --region "$region" \
+    --query 'clusters[]' \
+    --output text 2>/dev/null | tr '\t' '\n' | grep -v -e '^$' -e '^None$'
+}
+
+# Writes credentials for one cluster into our own kubeconfig and exports
+# KUBECONFIG so every kubectl call below uses it.
+use_eks_cluster() {
+  local profile="$1" region="$2" cluster="$3"
+  echo "Updating kubeconfig for $cluster..." >&2
+
+  if ! aws eks update-kubeconfig \
+    --profile "$profile" \
+    --region "$region" \
+    --name "$cluster" \
+    --kubeconfig "$KUBECONFIG_FILE" >/dev/null 2>&1; then
+    echo "Failed to fetch kubeconfig for $cluster." >&2
+    echo "Check that your IAM principal is mapped in the cluster's aws-auth or access entries." >&2
+    exit 1
+  fi
+
+  export KUBECONFIG="$KUBECONFIG_FILE"
+}
+
+list_namespaces() {
+  kubectl get namespaces -o json 2>/dev/null \
+    | jq -r '.items[].metadata.name'
+}
+
+# pod<TAB>ready<TAB>node
+list_pods() {
+  local namespace="$1"
+  kubectl get pods -n "$namespace" -o json 2>/dev/null \
+    | jq -r '
+        .items[]
+        | select(.status.phase == "Running")
+        | [ .metadata.name,
+            (([.status.containerStatuses[]? | select(.ready)] | length | tostring)
+              + "/" + (.spec.containers | length | tostring)),
+            (.spec.nodeName // "-") ]
+        | @tsv'
+}
+
+list_pod_containers() {
+  local namespace="$1" pod="$2"
+  kubectl get pod "$pod" -n "$namespace" -o json 2>/dev/null \
+    | jq -r '.spec.containers[].name'
+}
+
+kubectl_exec() {
+  local namespace="$1" pod="$2" container="$3"
+
+  echo "" >&2
+  echo "Connecting to container $container in pod $pod ..."
+  if ! kubectl exec -it -n "$namespace" "$pod" -c "$container" -- /bin/bash; then
+    echo "" >&2
+    echo "Retrying with /bin/sh ..." >&2
+    kubectl exec -it -n "$namespace" "$pod" -c "$container" -- /bin/sh
+  fi
+}
+
+pick_eks_cluster() {
+  local profile="$1" region="$2"
+  echo "Fetching EKS clusters..." >&2
+
+  local clusters=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && clusters+=("$line")
+  done < <(list_eks_clusters "$profile" "$region")
+
+  if [[ ${#clusters[@]} -eq 0 ]]; then
+    echo "No EKS clusters found in $region." >&2
+    exit 1
+  fi
+
+  if [[ ${#clusters[@]} -eq 1 ]]; then
+    echo "Auto-selecting: ${clusters[0]}" >&2
+    echo "${clusters[0]}"
+  else
+    select_menu "Select cluster:" "${clusters[@]}"
+  fi
+}
+
+pick_namespace() {
+  echo "Fetching namespaces..." >&2
+
+  local namespaces=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && namespaces+=("$line")
+  done < <(list_namespaces)
+
+  if [[ ${#namespaces[@]} -eq 0 ]]; then
+    echo "No namespaces found. Check your access to this cluster." >&2
+    exit 1
+  fi
+
+  select_menu "Select namespace:" "${namespaces[@]}"
+}
+
+pick_pod() {
+  local namespace="$1"
+  echo "Fetching pods in $namespace..." >&2
+
+  local rows=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && rows+=("$line")
+  done < <(list_pods "$namespace")
+
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    echo "No running pods found in namespace: $namespace" >&2
+    exit 1
+  fi
+
+  local selected
+  if [[ ${#rows[@]} -eq 1 ]]; then
+    selected="${rows[0]}"
+    echo "Auto-selecting: $selected" >&2
+  else
+    selected=$(select_menu "Select pod:" "${rows[@]}")
+  fi
+
+  echo "$selected" | awk -F'\t' '{print $1}'
+}
+
+pick_pod_container() {
+  local namespace="$1" pod="$2"
+
+  local containers=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && containers+=("$line")
+  done < <(list_pod_containers "$namespace" "$pod")
+
+  if [[ ${#containers[@]} -eq 0 ]]; then
+    echo "No containers found in pod: $pod" >&2
+    exit 1
+  fi
+
+  if [[ ${#containers[@]} -eq 1 ]]; then
+    echo "Auto-selecting container: ${containers[0]}" >&2
+    echo "${containers[0]}"
+  else
+    select_menu "Select container:" "${containers[@]}"
+  fi
+}
+
+cmd_pod() {
+  local ACCOUNT PROFILE REGION CLUSTER NAMESPACE POD CONTAINER
+
+  require_kubectl
+
+  ACCOUNT=$(pick_account)
+  [[ -z "$ACCOUNT" ]] && exit 0
+  PROFILE=$(load_config "$ACCOUNT" "profile")
+  REGION=$(load_config "$ACCOUNT" "region")
+
+  CLUSTER=$(pick_eks_cluster "$PROFILE" "$REGION")
+  [[ -z "$CLUSTER" ]] && exit 0
+
+  use_eks_cluster "$PROFILE" "$REGION" "$CLUSTER"
+
+  NAMESPACE=$(pick_namespace)
+  [[ -z "$NAMESPACE" ]] && exit 0
+
+  POD=$(pick_pod "$NAMESPACE")
+  [[ -z "$POD" ]] && exit 0
+
+  CONTAINER=$(pick_pod_container "$NAMESPACE" "$POD")
+  [[ -z "$CONTAINER" ]] && exit 0
+
+  kubectl_exec "$NAMESPACE" "$POD" "$CONTAINER"
+}
+
 cmd_db() {
   local ACCOUNT PROFILE REGION APP
   local DB_IDENTIFIER RDS_HOST LOCAL_PORT
@@ -697,6 +889,7 @@ USAGE
   ssm ssh      — Shell into an EC2 instance, an ECS container instance, or an
                  ECS/Fargate container. Detects ECS nodes and asks whether you
                  want the host shell or a container shell.
+  ssm pod      — Shell into an EKS pod via kubectl (cluster → namespace → pod)
   ssm db       — Open an RDS tunnel via SSM port forwarding
   ssm config   — View, add, or edit AWS account profiles
   ssm update   — Replace this script with the latest version from CDN
@@ -704,18 +897,20 @@ USAGE
 CONFIG FILE
   ~/.ssm/config.json — maps account names to AWS CLI profiles and regions.
   DB port assignments are auto-saved here on first use.
+  ~/.ssm/kubeconfig  — written by `ssm pod`. Your ~/.kube/config is never touched.
 
 EOF
 }
 
 case "$COMMAND" in
   ssh)    cmd_ssh ;;
+  pod)    cmd_pod ;;
   db)     cmd_db ;;
   config) cmd_config ;;
   update) cmd_update ;;
   help)   cmd_help ;;
   *)
-    echo "Usage: ssm [ssh|db|config|update|help]"
+    echo "Usage: ssm [ssh|pod|db|config|update|help]"
     exit 1
     ;;
 esac
