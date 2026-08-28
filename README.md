@@ -55,12 +55,14 @@ ssm help     # Show usage and config info
 3. If the app has both EC2 instances and ECS services, choose which to connect to
 4. Select instance or container (auto-selected if only one)
 5. Drops into an SSM shell session as `ubuntu`, or into the container via ECS Exec
+   (the container shell uses `bash` when the image has it, otherwise `sh`)
 
 **ECS detection.** After you pick an EC2 instance, `ssm ssh` checks whether it is registered
 as an ECS container instance. If it is, you are told which cluster it belongs to and asked
-whether you want the host shell (`sudo su - ubuntu`, as before) or a shell inside one of the
-containers running on it. A plain EC2 instance is unaffected — same menus, same shell, no
-extra prompt.
+whether you want the host shell or a shell inside one of the containers running on it.
+ECS container instances run the ECS-optimized AMI, so the host shell logs in as `ec2-user`
+there and as `ubuntu` everywhere else. A plain EC2 instance is unaffected — same menus,
+same `sudo su - ubuntu` shell, no extra prompt.
 
 **Fargate.** Fargate services have no EC2 instance, so they never appeared in the app list
 before. They are now discovered from their `App` tag and reachable through ECS Exec.

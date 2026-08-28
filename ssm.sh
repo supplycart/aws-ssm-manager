@@ -215,25 +215,17 @@ ecs_exec() {
 
   echo "" >&2
   echo "Connecting to container $container in task $task via ECS Exec ..."
-  if ! aws ecs execute-command \
+  # Pick the shell inside the container rather than retrying out here:
+  # `aws ecs execute-command` exits 0 even when the requested shell is missing
+  # (it only prints "Unable to start command"), so an outer retry never fires.
+  aws ecs execute-command \
     --profile "$profile" \
     --region "$region" \
     --cluster "$cluster" \
     --task "$task" \
     --container "$container" \
     --interactive \
-    --command "/bin/bash"; then
-    echo "" >&2
-    echo "Retrying with /bin/sh ..." >&2
-    aws ecs execute-command \
-      --profile "$profile" \
-      --region "$region" \
-      --cluster "$cluster" \
-      --task "$task" \
-      --container "$container" \
-      --interactive \
-      --command "/bin/sh"
-  fi
+    --command "/bin/sh -c 'if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi'"
 }
 
 ecs_pick_and_exec() {
@@ -445,12 +437,24 @@ cmd_ssh() {
     ci_arn=$(echo "$ecs_node" | awk -F'\t' '{print $2}')
     echo "" >&2
     echo "This instance is an ECS container instance in cluster $cluster." >&2
-    shell_choice=$(select_menu "Open which shell?" "Host shell (sudo su - ubuntu)" "Container shell (ECS Exec)")
+    shell_choice=$(select_menu "Open which shell?" "Host shell" "Container shell (ECS Exec)")
     [[ -z "$shell_choice" ]] && exit 0
     if [[ "$shell_choice" == "Container shell (ECS Exec)" ]]; then
       ssh_ecs_container_instance "$PROFILE" "$REGION" "$cluster" "$ci_arn"
       return
     fi
+
+    # ECS container instances run the ECS-optimized AMI (Amazon Linux), which has
+    # no `ubuntu` user, so pick the login user on the box instead of assuming it.
+    echo "" >&2
+    echo "Connecting to $INSTANCE_ID via SSM ..."
+    aws ssm start-session \
+      --profile "$PROFILE" \
+      --region "$REGION" \
+      --target "$INSTANCE_ID" \
+      --document-name AWS-StartInteractiveCommand \
+      --parameters '{"command": ["if id ubuntu >/dev/null 2>&1; then sudo su - ubuntu; else sudo su - ec2-user; fi"]}'
+    return
   fi
 
   echo "" >&2
