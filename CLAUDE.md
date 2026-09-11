@@ -17,6 +17,9 @@ required). Config lives at `~/.ssm/config.json`. Key internals of `ssm.sh`:
 - `select_menu()` wraps fzf for all interactive menus
 - `load_config(account, field)` reads from `~/.ssm/config.json` via jq
 - `get_db_port()` auto-assigns and persists local tunnel ports to config
+- `print_tunnel_banner()` draws the `ssm db` endpoint box. The `C_*` color variables are set
+  once at the top of the script and are empty unless stdout is a terminal, so piped output
+  stays plain; box characters fall back to ASCII outside a UTF-8 locale
 - All config writes follow the pattern: `updated=$(jq ... "$CONFIG_FILE") && echo "$updated" > "$CONFIG_FILE"`
 
 Every interactive prompt also has a flag that answers it, so a fully flagged command runs without

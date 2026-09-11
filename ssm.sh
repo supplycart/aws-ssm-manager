@@ -10,6 +10,17 @@ if ! command -v jq &>/dev/null; then
   exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Terminal styling. Color is on only when stdout is a terminal, so piped or
+# redirected output stays plain text; NO_COLOR turns it off everywhere.
+# ---------------------------------------------------------------------------
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+  C_RESET=$'\033[0m' C_BOLD=$'\033[1m' C_DIM=$'\033[2m'
+  C_GREEN=$'\033[32m' C_YELLOW=$'\033[33m'
+else
+  C_RESET="" C_BOLD="" C_DIM="" C_GREEN="" C_YELLOW=""
+fi
+
 load_config() {
   jq -r ".[\"$1\"][\"$2\"]" "$CONFIG_FILE"
 }
@@ -31,6 +42,78 @@ select_menu() {
   fi
 
   printf '%s\n' "${items[@]}" | fzf --prompt="$prompt " --height=~10 --layout=reverse --border
+}
+
+# Draws the "connect to this, not to that" box for `ssm db`. The tunnel endpoint
+# is the whole point of the command and used to scroll past as one plain line,
+# so it is boxed, colored, and shown next to the real endpoint it replaces.
+#
+# Padding is measured on the label and the value alone: ${#var} counts an escape
+# sequence as characters, so measuring the colored string would pull the right
+# border left by exactly the length of the escapes.
+print_tunnel_banner() {
+  local host="$1" port="$2" real_host="$3" real_port="$4"
+  local tl tr bl br ml mr hz vt ell dash
+
+  # The line-drawing glyphs are mojibake outside a UTF-8 locale.
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]*)
+      tl="┌" tr="┐" bl="└" br="┘" ml="├" mr="┤" hz="─" vt="│" ell="…" dash="—" ;;
+    *)
+      tl="+" tr="+" bl="+" br="+" ml="+" mr="+" hz="-" vt="|" ell="..." dash="-" ;;
+  esac
+
+  # COLUMNS is unset or 0 in a non-interactive shell, so an implausible value
+  # falls through to tput and then to a default rather than to a tiny box.
+  local cols="${COLUMNS:-0}"
+  [[ "$cols" =~ ^[0-9]+$ && "$cols" -ge 20 ]] || cols=$(tput cols 2>/dev/null)
+  [[ "$cols" =~ ^[0-9]+$ && "$cols" -ge 20 ]] || cols=80
+  # Two border characters plus a space of padding on each side.
+  local max_inner=$((cols - 4))
+  [[ "$max_inner" -ge 28 ]] || max_inner=28
+
+  local title="DB TUNNEL $dash connect using THESE values"
+
+  # Rows are held as label / value / color so the value can be truncated and
+  # colored without the label or the escapes skewing the measured width.
+  local labels=() values=() colors=()
+  labels+=("Host  ") values+=("$host")               colors+=("${C_BOLD}${C_GREEN}")
+  labels+=("Port  ") values+=("$port")               colors+=("${C_BOLD}${C_GREEN}")
+  labels+=("")       values+=("")                    colors+=("")
+  labels+=("")       values+=("real endpoint, do NOT use directly:") colors+=("$C_DIM")
+  labels+=("  ")     values+=("${real_host}:${real_port}")           colors+=("$C_DIM")
+
+  [[ ${#title} -le $max_inner ]] || title="${title:0:$((max_inner - ${#ell}))}$ell"
+
+  local i n inner=${#title} room width
+  n=${#labels[@]}
+  for ((i = 0; i < n; i++)); do
+    room=$((max_inner - ${#labels[i]}))
+    if [[ ${#values[i]} -gt $room ]]; then
+      values[i]="${values[i]:0:$((room - ${#ell}))}$ell"
+    fi
+    width=$((${#labels[i]} + ${#values[i]}))
+    [[ $width -le $inner ]] || inner=$width
+  done
+
+  local rule="" j
+  for ((j = 0; j < inner + 2; j++)); do rule="$rule$hz"; done
+
+  local pad
+  printf '%s%s%s\n' "$tl" "$rule" "$tr"
+  pad=$(printf '%*s' $((inner - ${#title})) '')
+  printf '%s %s%s%s%s %s\n' "$vt" "${C_BOLD}${C_YELLOW}" "$title" "$C_RESET" "$pad" "$vt"
+  printf '%s%s%s\n' "$ml" "$rule" "$mr"
+  for ((i = 0; i < n; i++)); do
+    pad=$(printf '%*s' $((inner - ${#labels[i]} - ${#values[i]})) '')
+    if [[ -n "${colors[i]}" ]]; then
+      printf '%s %s%s%s%s%s %s\n' \
+        "$vt" "${labels[i]}" "${colors[i]}" "${values[i]}" "$C_RESET" "$pad" "$vt"
+    else
+      printf '%s %s%s%s %s\n' "$vt" "${labels[i]}" "${values[i]}" "$pad" "$vt"
+    fi
+  done
+  printf '%s%s%s\n' "$bl" "$rule" "$br"
 }
 
 # ---------------------------------------------------------------------------
@@ -951,7 +1034,8 @@ cmd_db() {
     '{"host":[$host],"portNumber":[$port],"localPortNumber":[$local]}')
 
   echo ""
-  echo "Connect to: ${DB_ALIAS}:${LOCAL_PORT}"
+  print_tunnel_banner "$DB_ALIAS" "$LOCAL_PORT" "$RDS_HOST" "$RDS_PORT"
+  echo ""
   echo "Opening tunnel via $INSTANCE_ID ..."
   aws ssm start-session \
     --profile "$PROFILE" \

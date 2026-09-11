@@ -120,6 +120,54 @@ assert_eq "fromstdin" "$out" "'-' reads one line from stdin"
 assert_status 1 "literal secret on the command line is refused" read_secret_value "AKIAsecret"
 assert_contains "shell history" "$LAST_OUTPUT" "literal secret message explains why"
 
+echo "print_tunnel_banner"
+
+TUNNEL=(adam-prod.tunnel 15432 adam-prod.abc123.ap-southeast-1.rds.amazonaws.com 5432)
+
+out=$(print_tunnel_banner "${TUNNEL[@]}")
+assert_contains "adam-prod.tunnel" "$out" "banner shows the tunnel host"
+assert_contains "15432" "$out" "banner shows the tunnel port"
+assert_contains "adam-prod.abc123.ap-southeast-1.rds.amazonaws.com" "$out" "banner shows the real host"
+assert_contains "5432" "$out" "banner shows the real port"
+assert_contains "do NOT use" "$out" "banner says which endpoint not to use"
+
+# Captured output is not a terminal, so nothing may be colored -- an escape
+# sequence here would land in whatever file or pipe the output was sent to.
+case "$out" in
+  *$'\033'*) fail "banner is plain when stdout is not a tty" ;;
+  *) pass ;;
+esac
+
+# LC_ALL=C is both what a non-UTF-8 terminal gets and the only way to measure the
+# box: with ASCII borders every rendered column is exactly one byte.
+banner_line_widths() {
+  print_tunnel_banner "${TUNNEL[@]}" \
+    | sed $'s/\033\\[[0-9;]*m//g' \
+    | awk '{ print length($0) }'
+}
+
+widths=$(LC_ALL=C banner_line_widths | sort -u | wc -l | tr -d ' ')
+assert_eq "1" "$widths" "every line of the plain box is the same width"
+
+# Color must not move the right border: the padding has to be measured on the
+# text before the escapes are wrapped around it.
+widths=$(LC_ALL=C C_BOLD=$'\033[1m' C_DIM=$'\033[2m' C_GREEN=$'\033[32m' \
+  C_YELLOW=$'\033[33m' C_RESET=$'\033[0m' banner_line_widths | sort -u | wc -l | tr -d ' ')
+assert_eq "1" "$widths" "every line of the colored box is the same width"
+
+# A box wider than the terminal wraps into unreadable noise, so a long value is
+# truncated to fit rather than allowed to overflow.
+narrow=$(LC_ALL=C COLUMNS=44 print_tunnel_banner "${TUNNEL[@]}")
+widest=$(echo "$narrow" | awk '{ if (length($0) > m) m = length($0) } END { print m }')
+if [[ "$widest" -le 44 ]]; then pass; else fail "narrow box: widest line is $widest, want <= 44"; fi
+assert_contains "..." "$narrow" "a truncated value is marked with an ellipsis"
+
+# A non-interactive shell reports COLUMNS=0, which must not squeeze the box down
+# to its minimum width -- the real endpoint has to stay readable in a log.
+wide=$(LC_ALL=C COLUMNS=0 print_tunnel_banner "${TUNNEL[@]}")
+assert_contains "adam-prod.abc123.ap-southeast-1.rds.amazonaws.com:5432" "$wide" \
+  "an implausible COLUMNS falls back to a full-width box"
+
 echo ""
 if [[ $FAILED -eq 0 ]]; then
   echo "ok — $PASSED assertions passed"
