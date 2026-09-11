@@ -70,8 +70,10 @@ The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/
   otherwise. `script_version` reads the stamp back, which is how `ssm update` reports old -> new.
 - CI never pushes to `master`. `.github/rulesets/master.json` requires a PR plus the `test` check,
   which is the job id in `test.yml`, so renaming that job blocks every PR.
-  `.github/rulesets/release-tags.json` lets only GitHub Actions (app id 15368) create `v*.*.*`
-  tags and blocks moving or deleting them. A rerun therefore reuses the tag it finds on top of
+  `.github/rulesets/release-tags.json` blocks creating, moving or deleting `v*.*.*` tags for
+  everyone except deploy keys. GitHub rejects the Actions app as a bypass actor, so GITHUB_TOKEN
+  cannot create them: the workflow pushes the tag over SSH with the write deploy key in the
+  `RELEASE_DEPLOY_KEY` secret. Keep that the only write deploy key on the repo. A rerun therefore reuses the tag it finds on top of
   the commit (`existing_release_for`) instead of creating another.
 - The ruleset JSON is the source of truth; apply edits with
   `gh api -X PUT repos/supplycart/aws-ssm-manager/rulesets/<id> --input <file>`.

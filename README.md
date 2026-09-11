@@ -366,8 +366,8 @@ ssm version   # ssm v1.2.3
 `shells/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
 
 Publishing requires a `Production` environment on this repo with the variables
-`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secret
-`CLOUDFLARE_R2_CDN_SECRET`.
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secrets
+`CLOUDFLARE_R2_CDN_SECRET` and `RELEASE_DEPLOY_KEY` (see [Repository rulesets](#repository-rulesets)).
 
 To verify a release reached the CDN:
 
@@ -384,11 +384,23 @@ source of truth: edit it, then `PUT` it to `repos/supplycart/aws-ssm-manager/rul
 | File | Protects |
 |------|----------|
 | `master.json` | `master`: no direct pushes, force pushes or deletion. Changes arrive by PR (squash or rebase) with a passing `test` check. |
-| `release-tags.json` | `v*.*.*` tags: only GitHub Actions can create them, and nobody can move or delete them. |
+| `release-tags.json` | `v*.*.*` tags: only a deploy key can create them (in practice the deploy workflow), and nobody can move or delete them. |
 
 ```bash
 gh api -X POST repos/supplycart/aws-ssm-manager/rulesets --input .github/rulesets/release-tags.json
 gh api -X POST repos/supplycart/aws-ssm-manager/rulesets --input .github/rulesets/master.json
+```
+
+GitHub doesn't accept GitHub Actions as a ruleset bypass actor, so the deploy workflow pushes
+release tags over SSH with a write deploy key. Its private half is the `RELEASE_DEPLOY_KEY`
+secret. Deploy keys are the only bypass on `release-tags.json`, so keep this the repository's
+only write deploy key. Any other write key could create release tags too. To rotate it:
+
+```bash
+ssh-keygen -t ed25519 -N "" -C "aws-ssm-manager deploy.yml release tags" -f release_deploy_key
+gh repo deploy-key add release_deploy_key.pub --allow-write --title "deploy.yml release tags"
+gh secret set RELEASE_DEPLOY_KEY --env Production < release_deploy_key
+rm release_deploy_key release_deploy_key.pub   # then delete the old key in Settings → Deploy keys
 ```
 
 To remove a tag that should not exist, an admin sets the release-tag ruleset to `disabled`,

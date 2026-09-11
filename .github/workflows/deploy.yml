@@ -80,21 +80,30 @@ jobs:
                       --jq '.[] | select(.enforcement == "active") | .id'); do
                     match=$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" --jq '
                       select((.conditions.ref_name.include | index("refs/tags/v*.*.*"))
-                        and ([.rules[].type] | index("deletion") and index("update")))
+                        and ([.rules[].type] | index("creation") and index("update") and index("deletion")))
                       | .name')
                     if [[ -n "$match" ]]; then
                       echo "Release tags are protected by ruleset '$match' ($id)."
                       exit 0
                     fi
                   done
-                  echo "::error::No active tag ruleset blocks updating and deleting refs/tags/v*.*.*. Apply .github/rulesets/release-tags.json first."
+                  echo "::error::No active tag ruleset blocks creating, updating and deleting refs/tags/v*.*.*. Apply .github/rulesets/release-tags.json first."
                   exit 1
 
+            # GitHub rejects the Actions app as a ruleset bypass actor, so
+            # GITHUB_TOKEN cannot create a protected tag. The tag is pushed with
+            # the write deploy key that release-tags.json exempts instead.
             - name: Create release tag
               if: steps.version.outputs.reuse == 'false'
               env:
                   VERSION: ${{ steps.version.outputs.version }}
+                  RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
               run: |
+                  if [[ -z "$RELEASE_DEPLOY_KEY" ]]; then
+                    echo "::error::The Production environment has no RELEASE_DEPLOY_KEY secret, which pushes release tags."
+                    exit 1
+                  fi
+
                   source .github/scripts/release.sh
                   stamp_version ssm.sh "$VERSION"
 
@@ -102,8 +111,17 @@ jobs:
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                   git commit -am "Release $VERSION" -m "Source: $GITHUB_SHA"
                   git tag -a "$VERSION" -m "$VERSION"
+
+                  key="$RUNNER_TEMP/release_deploy_key"
+                  known_hosts="$RUNNER_TEMP/github_known_hosts"
+                  trap 'rm -f "$key"' EXIT
+                  (umask 077 && printf '%s\n' "$RELEASE_DEPLOY_KEY" > "$key")
+                  # Trust GitHub's host keys from the authenticated API, not first contact.
+                  gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts"
+
                   # Only the tag is pushed: the release commit never lands on master.
-                  git push origin "refs/tags/$VERSION"
+                  GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
+                    git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$VERSION"
 
             - name: Check out existing release tag
               if: steps.version.outputs.reuse == 'true'
