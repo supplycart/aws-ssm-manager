@@ -1,0 +1,106 @@
+name: Docs
+
+on:
+    pull_request:
+        branches:
+            - master
+        paths:
+            - docs/**
+            - .github/workflows/docs.yml
+            - .github/scripts/docs_upload.sh
+    push:
+        branches:
+            - master
+        paths:
+            - docs/**
+            - .github/workflows/docs.yml
+            - .github/scripts/docs_upload.sh
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+# One run per ref at a time, so an older build never finishes uploading after a
+# newer one.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    build:
+        name: Build
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: docs
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Install pnpm
+              uses: pnpm/action-setup@v6
+              with:
+                  package_json_file: docs/package.json
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v7
+              with:
+                  node-version-file: docs/.nvmrc
+                  cache: pnpm
+                  cache-dependency-path: docs/pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Check formatting
+              run: pnpm format:check
+
+            - name: Build
+              run: pnpm build
+
+            - name: Keep the build for deploy
+              if: github.event_name != 'pull_request'
+              uses: actions/upload-artifact@v7
+              with:
+                  name: docs-dist
+                  path: docs/.vitepress/dist
+                  retention-days: 7
+
+    deploy:
+        name: Deploy
+        needs: build
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+        runs-on: ubuntu-latest
+        environment: Production
+        env:
+            AWS_ACCESS_KEY_ID: ${{ vars.CLOUDFLARE_R2_CDN_ID }}
+            AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_CDN_SECRET }}
+            AWS_DEFAULT_REGION: auto
+            CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+            CLOUDFLARE_R2_CDN_BUCKET: ${{ vars.CLOUDFLARE_R2_CDN_BUCKET }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Download build
+              uses: actions/download-artifact@v8
+              with:
+                  name: docs-dist
+                  path: dist
+
+            # The site shares shells/aws-ssm-manager/ with install.sh, ssm.sh and
+            # the vX.Y.Z/ copies the release uploads. docs_upload_plan refuses a
+            # build that could overwrite them, and nothing here deletes.
+            - name: Upload to R2
+              run: |
+                  source .github/scripts/docs_upload.sh
+                  plan=$(docs_upload_plan dist)
+
+                  endpoint="https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
+                  while IFS=$'\t' read -r path type; do
+                    aws s3 cp "dist/$path" \
+                      "s3://$CLOUDFLARE_R2_CDN_BUCKET/shells/aws-ssm-manager/$path" \
+                      --endpoint-url "$endpoint" --content-type "$type" --only-show-errors
+                  done <<< "$plan"
+
+                  echo "Uploaded $(wc -l <<< "$plan") files to https://cdn.supplycart.my/shells/aws-ssm-manager/index.html"

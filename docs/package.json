@@ -1,0 +1,17 @@
+{
+  "name": "aws-ssm-manager-docs",
+  "private": true,
+  "description": "Docs site for ssm, served from cdn.supplycart.my/shells/aws-ssm-manager/",
+  "scripts": {
+    "dev": "vitepress dev",
+    "build": "vitepress build",
+    "preview": "vitepress preview",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "packageManager": "pnpm@10.15.0",
+  "devDependencies": {
+    "prettier": "^3.8.1",
+    "vitepress": "^1.6.4"
+  }
+}

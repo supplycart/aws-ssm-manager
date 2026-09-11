@@ -2,361 +2,35 @@
 
 A CLI tool for connecting to AWS EC2 instances, ECS containers, EKS pods, and RDS databases —
 without needing a bastion host or open SSH ports. Interactive by default, fully scriptable with
-flags.
+flags. macOS only.
 
-## Features
+**Docs: [cdn.supplycart.my/shells/aws-ssm-manager](https://cdn.supplycart.my/shells/aws-ssm-manager/index.html)**
+— the install guide with a version picker, every command and its flags, and the AWS setup ssm
+needs.
 
-- Interactive environment, application, and instance selection using arrow keys
-- Every menu has a flag that replaces it, so a known destination is one command: `ssm ssh --env staging --app adam`
-- SSH into any EC2 instance via SSM
-- Detects ECS container instances and offers the host shell or a container shell
-- Shell into ECS and Fargate containers via ECS Exec
-- Shell into EKS pods via `ssm pod` (cluster → namespace → pod → container)
-- Open RDS tunnels via SSM port forwarding (supports PostgreSQL, MySQL, and any engine)
-- Manage AWS account profiles and CLI credentials via `ssm config`
-- Auto-discovers apps and instances from EC2/RDS `App` tags
-- Stable local ports per database — configure your DB client once
-- Temporary `/etc/hosts` alias while the DB tunnel is active (e.g. `sc-staging-adam-rds.tunnel`)
-
-## Prerequisites
-
-### 1. Install
+## Install
 
 ```bash
-bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)
+bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)          # latest
+bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.1.0   # a specific release
 ```
 
-To install a specific version, add its tag. [supplycart.github.io/aws-ssm-manager](https://supplycart.github.io/aws-ssm-manager/)
-lists every release with its command:
+This installs `awscli`, `fzf`, `jq`, `kubectl` and the AWS Session Manager plugin, and links
+`/usr/local/bin/ssm` to `~/.ssm/ssm.sh`. A pinned install stays on its release until `ssm update`,
+which moves it to the latest.
+
+Then add an AWS account with `ssm config`:
 
 ```bash
-bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.1.0
-```
-
-A pinned install stays on that version until `ssm update`, which moves it to the latest.
-
-This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and creates a symlink at `/usr/local/bin/ssm` pointing to `~/.ssm/ssm.sh`. The `ssm` command is available immediately in any new shell — no `source ~/.zshrc` needed.
-
-### 2. Configure
-
-Run the interactive config command to add your first account. It will write to both `~/.ssm/config.json` and `~/.aws/credentials`:
-
-```bash
-ssm config
-# → add → enter account name, AWS profile name, region
-# → prompted to set AWS access key ID and secret
-```
-
-The `databases` object in `~/.ssm/config.json` is auto-populated on first `ssm db` use.
-
-## Usage
-
-```bash
-ssm ssh      # Shell into an EC2 instance or an ECS/Fargate container
-ssm pod      # Shell into an EKS pod
-ssm db       # Open an RDS tunnel
-ssm config   # Manage account profiles and AWS credentials
+ssm ssh        # Shell into an EC2 instance or an ECS/Fargate container
+ssm pod        # Shell into an EKS pod
+ssm db         # Open an RDS tunnel
+ssm config     # Manage account profiles and AWS credentials
 ssm update     # Update ssm to the latest version
 ssm uninstall  # Remove ssm, and optionally its config and dependencies
 ssm version    # Print the installed version
 ssm help       # Show usage and config info
 ```
-
-### Skipping the menus
-
-Every prompt has a flag that answers it. Supply the flags you know and the rest still come up as
-menus, so `ssm ssh` on its own behaves exactly as it always has:
-
-```bash
-ssm ssh                                   # fully interactive
-ssm ssh --env staging                     # skips the account menu
-ssm ssh --env staging --app adam          # no prompts at all if the app has one instance
-ssm ssh --env staging --app adam --container php-fpm
-ssm db  --env staging --app adam --db sc-staging-adam-rds
-ssm pod --env staging -n default --pod api-7d9f
-```
-
-| Command | Flags |
-|---------|-------|
-| all | `--env\|-e <name>` (alias `--account`), `--help\|-h` |
-| `ssh` | `--app <name>`, `--type ec2\|ecs`, `--instance <id\|Name>`, `--container <name>`, `--task <id>`, `--host` |
-| `db` | `--app <name>`, `--db <identifier>`, `--instance <id\|Name>` |
-| `pod` | `--cluster <name>`, `--namespace\|-n <ns>`, `--pod <name>`, `--container\|-c <name>` |
-| `config` | see [ssm config](#ssm-config) |
-
-`--flag value` and `--flag=value` both work. `ssm <command> --help` prints that command's flags.
-
-A value that doesn't exist is an error listing the valid ones — never a re-prompt — so a fully
-flagged command can't stall waiting for input:
-
-```
-$ ssm ssh --env staging --app adm
-Error: no app 'adm' in account staging.
-Available:
-  adam
-  eva
-  hub
-```
-
-Instances match on either their id or their `Name` tag, so `--instance i-0abc123` and
-`--instance web-01` both work. If `--container` matches several running tasks, `ssm` lists them
-and asks you to add `--task <id>`.
-
-### ssm ssh
-
-1. Select environment
-2. Select application (discovered from the `App` tag on EC2 instances and ECS services)
-3. If the app has both EC2 instances and ECS services, choose which to connect to
-4. Select instance or container (auto-selected if only one)
-5. Drops into an SSM shell session as `ubuntu`, or into the container via ECS Exec
-   (the container shell uses `bash` when the image has it, otherwise `sh`)
-
-Non-interactively: `--env` answers step 1, `--app` step 2, `--type ec2|ecs` step 3, and
-`--instance` or `--container` step 4. `--instance` implies `--type ec2` and `--container`/`--task`
-imply `--type ecs`, so `--type` is only needed to pick the EC2 side without naming an instance.
-On an ECS container instance, `--host` takes the host shell and `--container` takes the container
-shell, which is the "host or container" question below.
-
-**ECS detection.** After you pick an EC2 instance, `ssm ssh` checks whether it is registered
-as an ECS container instance. If it is, you are told which cluster it belongs to and asked
-whether you want the host shell or a shell inside one of the containers running on it.
-ECS container instances run the ECS-optimized AMI, so the host shell logs in as `ec2-user`
-there and as `ubuntu` everywhere else. A plain EC2 instance is unaffected — same menus,
-same `sudo su - ubuntu` shell, no extra prompt.
-
-**Fargate.** Fargate services have no EC2 instance, so they never appeared in the app list
-before. They are now discovered from their `App` tag and reachable through ECS Exec.
-
-### ssm pod
-
-1. Select environment
-2. Select EKS cluster (auto-selected if only one)
-3. Select namespace
-4. Select pod (running pods only)
-5. Select container (auto-selected if only one)
-6. Drops into the container via `kubectl exec`
-
-Non-interactively: `--env`, `--cluster`, `--namespace`/`-n`, `--pod`, `--container`/`-c`.
-
-Pods are not reachable over SSM at all, so this path uses `kubectl` rather than Session
-Manager — which is why it is a separate command instead of a branch of `ssm ssh`.
-
-Credentials are fetched with `aws eks update-kubeconfig` and written to **`~/.ssm/kubeconfig`**.
-Your `~/.kube/config` and your current kubectl context are never touched.
-
-### ssm db
-
-1. Select environment
-2. Select application
-3. Select RDS instance (auto-selected if only one)
-4. A stable local port is assigned on first use and saved to `config.json`
-5. A temporary hostname alias (`<db-identifier>.tunnel`) is added to `/etc/hosts`
-6. Tunnel opens — connect your DB client to `<db-identifier>.tunnel:<port>`
-7. On exit (Ctrl+C), the `/etc/hosts` entry is removed automatically
-
-Non-interactively: `--env`, `--app`, `--db <identifier>`. The jump host is the first running
-instance of the app; `--instance <id|Name>` picks a different one.
-
-### ssm config
-
-Run `ssm config` for the menu, or name the action directly:
-
-```bash
-ssm config view   [--env <name>]
-ssm config add    --env <name> [--profile <p>] [--region <r>]
-                  [--access-key <k>] [--secret-key -] [--skip-credentials]
-ssm config edit   --env <name> [--profile <p>] [--region <r>]
-                  [--access-key <k>] [--secret-key -]
-ssm config delete --env <name> [--yes] [--delete-profile]
-```
-
-`edit` applies every field flag you pass in one go. `delete` still asks for confirmation unless
-you pass `--yes`, and keeps the AWS CLI profile unless you pass `--delete-profile`.
-
-**Secrets are never taken as a flag value** — that would record them in your shell history and
-expose them in `ps`. Pass them one of these two ways instead:
-
-```bash
-SSM_AWS_SECRET_KEY="$SECRET" ssm config add --env staging --profile sc-staging \
-  --region ap-southeast-5 --access-key AKIA...
-
-echo "$SECRET" | ssm config edit --env staging --secret-key -
-```
-
-The four actions:
-
-| Action | Description |
-|--------|-------------|
-| `view` | Print `~/.ssm/config.json` and show masked AWS key IDs per account |
-| `add` | Add a new account entry and optionally configure its AWS CLI credentials |
-| `edit` | Edit `profile`, `region`, `aws-access-key`, or `aws-secret-key` for an account |
-| `delete` | Remove an account and optionally delete the linked AWS CLI profile |
-
-**add** prompts for:
-- Account name (key in `~/.ssm/config.json`)
-- AWS CLI profile name
-- AWS region
-- Access Key ID and Secret Access Key (optional — skippable)
-
-**edit** field options:
-- `profile` / `region` — updates `~/.ssm/config.json`
-- `aws-access-key` — updates `~/.aws/credentials` via `aws configure set`
-- `aws-secret-key` — updates `~/.aws/credentials` (input is hidden)
-
-**delete** removes the account from `~/.ssm/config.json` and optionally strips the AWS CLI profile from `~/.aws/credentials` and `~/.aws/config`.
-
-### ssm uninstall
-
-```bash
-ssm uninstall [--yes] [--purge] [--with-deps]
-```
-
-After a confirmation, removes the `ssm` command: the `/usr/local/bin/ssm` symlink and
-`~/.ssm/ssm.sh`. A `/usr/local/bin/ssm` that points anywhere else is left alone.
-
-It then opens a checklist of what else is on the machine. Tab marks an item, Enter confirms:
-
-| Item | Removed with |
-|------|--------------|
-| `~/.ssm` — config, remembered DB ports, kubeconfig | `rm -rf ~/.ssm` |
-| `fzf`, `jq`, `kubectl` | `brew uninstall` |
-| AWS CLI v2 | `/usr/local/aws-cli` and its links in `/usr/local/bin` (sudo) |
-| Session Manager plugin | `/usr/local/sessionmanagerplugin` and its link (sudo) |
-
-Only items that are installed are listed, and nothing is removed unless you mark it — pressing
-Enter straight away keeps everything. ssm cannot tell whether `install.sh` added a dependency or
-found it already there, and other tools may rely on them. `~/.aws` and Homebrew itself are never
-touched.
-
-Non-interactively, `--yes` skips the confirmation and removes only the command. Add `--purge` for
-`~/.ssm` and `--with-deps` for the dependencies.
-
-## AWS Requirements
-
-### IAM Policy
-
-Attach the following policy to the IAM user or role:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "DescribeEC2Instances",
-      "Effect": "Allow",
-      "Action": ["ec2:DescribeInstances"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "DescribeRDSInstances",
-      "Effect": "Allow",
-      "Action": ["rds:DescribeDBInstances"],
-      "Resource": "*"
-    },
-    {
-      "Sid": "ECSDiscoverAndExec",
-      "Effect": "Allow",
-      "Action": [
-        "ecs:ListClusters",
-        "ecs:ListServices",
-        "ecs:ListTasks",
-        "ecs:ListContainerInstances",
-        "ecs:DescribeServices",
-        "ecs:DescribeTasks",
-        "ecs:ExecuteCommand",
-        "tag:GetResources"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "EKSDiscoverAndConnect",
-      "Effect": "Allow",
-      "Action": [
-        "eks:ListClusters",
-        "eks:DescribeCluster"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SSMStartSession",
-      "Effect": "Allow",
-      "Action": [
-        "ssm:StartSession",
-        "ssm:TerminateSession",
-        "ssm:ResumeSession",
-        "ssm:DescribeSessions",
-        "ssm:GetConnectionStatus"
-      ],
-      "Resource": "*"
-    },
-    {
-      "Sid": "SSMPortForwarding",
-      "Effect": "Allow",
-      "Action": ["ssm:StartSession"],
-      "Resource": [
-        "arn:aws:ssm:*::document/AWS-StartInteractiveCommand",
-        "arn:aws:ssm:*::document/AWS-StartPortForwardingSessionToRemoteHost"
-      ]
-    }
-  ]
-}
-```
-
-### EC2 Tags
-
-EC2 instances must have:
-
-| Tag | Value |
-|-----|-------|
-| `App` | app name (e.g. `adam`, `eva`, `hub`) |
-
-### ECS Tags
-
-ECS **services** must carry the same `App` tag as EC2 instances. Discovery uses the Resource
-Groups Tagging API (`tag:GetResources`) for speed; without that permission the tool falls
-back to enumerating clusters and services, which is slower but needs no extra IAM.
-
-### RDS Tags
-
-RDS instances must have the same `App` tag as their corresponding EC2 instances.
-
-### EC2 Instance Profile
-
-Target EC2 instances must have the `AmazonSSMManagedInstanceCore` policy attached to their instance profile, and the SSM agent must be running.
-
-### EKS Access
-
-`ssm pod` needs `kubectl` (installed by `install.sh`) and IAM permission to describe the
-cluster. Beyond IAM, your principal must also be mapped **inside** the cluster — either as
-an access entry or in the `aws-auth` ConfigMap — with rights to list namespaces and pods
-and to create `pods/exec`. Without that mapping the AWS calls succeed but `kubectl` is
-denied; `ssm pod` reports this rather than failing with a raw error.
-
-### ECS Exec
-
-To shell into a container, the ECS service must be deployed with `enableExecuteCommand` and
-its **task role** must allow `ssmmessages:CreateControlChannel`, `ssmmessages:CreateDataChannel`,
-`ssmmessages:OpenControlChannel` and `ssmmessages:OpenDataChannel`. If exec is not enabled,
-`ssm ssh` says so and prints the `aws ecs update-service` command that turns it on rather
-than failing with a raw AWS error.
-
-## Config File Reference
-
-`~/.ssm/config.json` structure:
-
-```json
-{
-  "<environment-name>": {
-    "profile": "<aws-cli-profile-name>",
-    "region": "<aws-region>",
-    "databases": {
-      "<db-identifier>": <local-port>
-    }
-  }
-}
-```
-
-`databases` is managed automatically — ports are assigned on first use and reused on subsequent runs. All other fields are managed via `ssm config`.
 
 ## Development
 
@@ -366,9 +40,41 @@ This repository is the source of truth for the `ssm` CLI. It previously lived in
 Run the same checks CI runs before opening a PR:
 
 ```bash
-bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh
-bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh
+bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh && bash -n .github/scripts/docs_upload.sh
+bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh
 ```
+
+### Docs site
+
+`docs/` is a [VitePress](https://vitepress.dev/) site set up like
+[`supplycart/wiki`](https://github.com/supplycart/wiki): pages in `docs/src/`, the sidebar in
+`docs/src/sidebar.mts`, and site config split across `docs/.vitepress/*.config.mts`. Every page
+needs `title` and `description` frontmatter and a sidebar entry.
+
+```bash
+cd docs
+pnpm install
+pnpm dev       # http://localhost:5173/shells/aws-ssm-manager/
+pnpm format    # CI runs pnpm format:check
+pnpm build     # output in docs/.vitepress/dist
+```
+
+`.github/workflows/docs.yml` builds the site on every PR that touches `docs/`. On `master` it uploads
+the build into the `supplycart-cdn` R2 bucket under `shells/aws-ssm-manager/`, next to the release
+scripts:
+
+- The upload never deletes, and `.github/scripts/docs_upload.sh` refuses a build that contains a
+  `.sh` file or a `vX.Y.Z/` folder, so it can't overwrite anything a release put there.
+- R2 serves objects by exact key, so the site is built with `cleanUrls: false` (pages end in
+  `.html`), and links must name a page, never a folder.
+- Each file is stored with an explicit content type, because the CDN sends `nosniff`.
+
+A redirect rule on the `supplycart.my` zone (Cloudflare dashboard → Rules → Redirect Rules) sends
+exactly `/shells/aws-ssm-manager` and `/shells/aws-ssm-manager/` to `…/index.html`. It matches
+those two paths only: a prefix match would also redirect `install.sh` and `ssm update`.
+
+The install page reads the release list from the GitHub API in the browser, so a new release shows
+up there without a docs deploy.
 
 ### Releases
 
@@ -398,10 +104,6 @@ checks the version exists before installing anything:
 bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.2.3
 ssm version   # ssm v1.2.3
 ```
-
-The [install page](https://supplycart.github.io/aws-ssm-manager/) is `docs/index.html`, served by
-GitHub Pages from `master` `/docs` (set under **Settings → Pages**). It reads the release list from
-the GitHub API in the browser, so a new release shows up there without a deploy.
 
 Up to v1.1.0 the scripts lived directly under `shells/`, and installs from then still run
 `ssm update` against `shells/ssm.sh`. So every release also writes the latest `ssm.sh` and
