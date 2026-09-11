@@ -124,7 +124,8 @@ print_tunnel_banner() {
 # Every flag the script knows about, in any command. parse_args clears all of
 # them on entry so a second call in the same shell starts clean.
 ALL_ARG_FLAGS="env app type instance container task host db cluster namespace \
-pod profile region access-key secret-key skip-credentials yes delete-profile"
+pod profile region access-key secret-key skip-credentials yes delete-profile \
+name port force"
 
 # --access-key -> ARG_ACCESS_KEY
 arg_var() {
@@ -1059,8 +1060,8 @@ cmd_config() {
       ;;
   esac
 
-  parse_args "--env --profile --region --access-key --secret-key" \
-    "--skip-credentials --yes --delete-profile" "$@" || exit 1
+  parse_args "--env --name --profile --region --access-key --secret-key --db --port" \
+    "--skip-credentials --yes --delete-profile --force" "$@" || exit 1
 
   if [[ -z "$action" ]]; then
     action=$(select_menu "Config action:" "view" "add" "edit" "delete")
@@ -1082,6 +1083,78 @@ config_set_field() {
   updated=$(jq ".[\"$account\"][\"$field\"] = \"$value\"" "$CONFIG_FILE") || return 1
   echo "$updated" > "$CONFIG_FILE"
   echo "Updated $account.$field -> '$value'."
+}
+
+# Ports land in the config as JSON numbers, so a value that is not all digits
+# has to be caught before it reaches jq.
+validate_port() {
+  local port="$1"
+  case "$port" in
+    '' | *[!0-9]*)
+      echo "Error: port must be a whole number in 1-65535, got '$port'." >&2
+      return 1
+      ;;
+  esac
+  if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
+    echo "Error: port must be a whole number in 1-65535, got '$port'." >&2
+    return 1
+  fi
+}
+
+config_account_exists() {
+  jq -e --arg name "$1" 'has($name)' "$CONFIG_FILE" >/dev/null 2>&1
+}
+
+# Moves the whole account object, so the profile, region and db port map all
+# follow the new name. The AWS CLI profile is a field, not the key, so renaming
+# an account never touches ~/.aws.
+config_rename_account() {
+  local old="$1" new="$2" updated
+  if config_account_exists "$new"; then
+    echo "Error: account '$new' already exists in $CONFIG_FILE." >&2
+    return 1
+  fi
+  updated=$(jq --arg old "$old" --arg new "$new" \
+    '.[$new] = .[$old] | del(.[$old])' "$CONFIG_FILE") || return 1
+  echo "$updated" > "$CONFIG_FILE"
+  echo "Renamed account '$old' -> '$new'."
+}
+
+config_set_db_port() {
+  local account="$1" db="$2" port="$3" updated clash
+  validate_port "$port" || return 1
+  # --argjson wants a canonical decimal; "015432" is not valid JSON on its own.
+  port=$((10#$port))
+
+  # get_db_port avoids collisions when it picks a port for you; a port you name
+  # yourself is your call, so this warns and still writes it.
+  clash=$(jq -r --arg acct "$account" --arg db "$db" --argjson port "$port" '
+    [ to_entries[]
+      | .key as $a
+      | (.value.databases // {}) | to_entries[]
+      | select(.value == $port and ($a != $acct or .key != $db))
+      | "\($a).\(.key)" ] | join(", ")' "$CONFIG_FILE")
+  [[ -n "$clash" ]] && echo "Warning: port $port is already assigned to $clash." >&2
+
+  updated=$(jq --arg acct "$account" --arg db "$db" --argjson port "$port" \
+    '.[$acct].databases = ((.[$acct].databases // {}) | .[$db] = $port)' \
+    "$CONFIG_FILE") || return 1
+  echo "$updated" > "$CONFIG_FILE"
+  echo "Set $account.$db port -> $port."
+}
+
+config_unset_db_port() {
+  local account="$1" db="$2" updated existing
+  existing=$(jq -r --arg acct "$account" --arg db "$db" \
+    '.[$acct].databases[$db] // empty' "$CONFIG_FILE")
+  if [[ -z "$existing" ]]; then
+    echo "Error: no port assignment for '$db' in account '$account'." >&2
+    return 1
+  fi
+  updated=$(jq --arg acct "$account" --arg db "$db" \
+    'del(.[$acct].databases[$db])' "$CONFIG_FILE") || return 1
+  echo "$updated" > "$CONFIG_FILE"
+  echo "Removed port $existing for '$db' in account '$account'."
 }
 
 aws_profile_configure() {
@@ -1123,6 +1196,17 @@ config_add() {
   [[ -z "$name" ]] && read -r -p "Account name: " name
   [[ -z "$name" ]] && { echo "Aborted." >&2; return 1; }
 
+  # Adding over an existing account used to replace it silently, taking its db
+  # port assignments with it. --force keeps that behaviour, deliberately.
+  if config_account_exists "$name"; then
+    if [[ -z "$ARG_FORCE" ]]; then
+      echo "Error: account '$name' already exists in $CONFIG_FILE." >&2
+      echo "Use 'ssm config edit --env $name' to change it, or --force to replace it." >&2
+      return 1
+    fi
+    echo "Replacing existing account '$name'."
+  fi
+
   profile="$ARG_PROFILE"
   [[ -z "$profile" ]] && read -r -p "AWS profile: " profile
   region="$ARG_REGION"
@@ -1160,6 +1244,18 @@ config_delete() {
   local account updated
   account=$(pick_account "$ARG_ENV") || exit 1
   [[ -z "$account" ]] && exit 0
+
+  # --db narrows the delete to a single port assignment; without it the whole
+  # account goes, as before.
+  if [[ -n "$ARG_DB" ]]; then
+    if [[ -z "$ARG_YES" ]]; then
+      local confirm_db
+      read -r -p "Delete port assignment '$ARG_DB' from account '$account'? [y/N]: " confirm_db
+      [[ "$confirm_db" != "y" && "$confirm_db" != "Y" ]] && { echo "Aborted." >&2; return; }
+    fi
+    config_unset_db_port "$account" "$ARG_DB"
+    return $?
+  fi
 
   # Deleting is the one destructive action here, so it still asks unless --yes.
   if [[ -z "$ARG_YES" ]]; then
@@ -1212,8 +1308,13 @@ config_edit() {
 
   # Field flags apply every field they name in one pass, so --profile and
   # --region together take one command instead of two trips through the menu.
-  if [[ -n "$ARG_PROFILE" || -n "$ARG_REGION" || -n "$ARG_ACCESS_KEY" \
-     || -n "$ARG_SECRET_KEY" || -n "$SSM_AWS_SECRET_KEY" ]]; then
+  if [[ -n "$ARG_NAME" || -n "$ARG_PROFILE" || -n "$ARG_REGION" || -n "$ARG_ACCESS_KEY" \
+     || -n "$ARG_SECRET_KEY" || -n "$SSM_AWS_SECRET_KEY" || -n "$ARG_DB" || -n "$ARG_PORT" ]]; then
+    # Rename first so every other edit in this pass lands on the new name.
+    if [[ -n "$ARG_NAME" ]]; then
+      config_rename_account "$account" "$ARG_NAME" || return 1
+      account="$ARG_NAME"
+    fi
     if [[ -n "$ARG_PROFILE" ]]; then
       config_set_field "$account" "profile" "$ARG_PROFILE" || return 1
       # Credential edits below belong to the profile we just moved to.
@@ -1231,13 +1332,48 @@ config_edit() {
       aws configure set aws_secret_access_key "$secret" --profile "$profile"
       echo "Updated AWS secret key for profile '$profile'."
     fi
+    if [[ -n "$ARG_DB" || -n "$ARG_PORT" ]]; then
+      if [[ -z "$ARG_DB" || -z "$ARG_PORT" ]]; then
+        echo "Error: --db and --port go together -- --db names the database, --port its local port." >&2
+        return 1
+      fi
+      config_set_db_port "$account" "$ARG_DB" "$ARG_PORT" || return 1
+    fi
     return 0
   fi
 
-  field=$(select_menu "Select field to edit:" "profile" "region" "aws-access-key" "aws-secret-key")
+  field=$(select_menu "Select field to edit:" \
+    "name" "profile" "region" "aws-access-key" "aws-secret-key" "database-port")
   [[ -z "$field" ]] && exit 0
 
   case "$field" in
+    name)
+      local value
+      read -r -p "New account name [$account]: " value
+      [[ -z "$value" || "$value" == "$account" ]] && { echo "Unchanged."; return 0; }
+      config_rename_account "$account" "$value"
+      ;;
+    database-port)
+      local dbs=() db current value
+      while IFS= read -r line; do
+        [[ -n "$line" ]] && dbs+=("$line")
+      done < <(jq -r --arg acct "$account" '(.[$acct].databases // {}) | keys[]' "$CONFIG_FILE")
+      if [[ ${#dbs[@]} -eq 0 ]]; then
+        echo "No port assignments for '$account' yet. 'ssm db' creates one on first use." >&2
+        return 1
+      fi
+      db=$(select_menu "Select database:" "${dbs[@]}") || return 1
+      [[ -z "$db" ]] && return 0
+      current=$(jq -r --arg acct "$account" --arg db "$db" \
+        '.[$acct].databases[$db]' "$CONFIG_FILE")
+      read -r -p "Local port for $db [$current] (or 'none' to remove): " value
+      value="${value:-$current}"
+      if [[ "$value" == "none" ]]; then
+        config_unset_db_port "$account" "$db"
+      else
+        config_set_db_port "$account" "$db" "$value"
+      fi
+      ;;
     profile|region)
       local current value
       current=$(load_config "$account" "$field")
@@ -1299,6 +1435,17 @@ ssm ssh — Shell into an EC2 instance, an ECS container instance, or an
                 on an ECS container instance
   --task        ECS task id, to disambiguate when --container matches several
   --host        on an ECS container instance, open the host shell
+
+EXAMPLES
+  ssm ssh                                       fully interactive
+  ssm ssh --env staging                         skips the account menu
+  ssm ssh --env staging --app adam              no prompts if the app has one instance
+  ssm ssh --env staging --instance web-01       match an EC2 Name tag
+  ssm ssh --env staging --instance i-0abc123    or an instance id
+  ssm ssh --env staging --app adam --container php-fpm
+  ssm ssh --env staging --app adam --container php-fpm --task 7d9f2a
+  ssm ssh --env staging --app adam --type ecs   when the app has both EC2 and ECS
+  ssm ssh --env staging --app adam --host       host shell on an ECS node
 EOF
       ;;
     pod)
@@ -1313,6 +1460,14 @@ ssm pod — Shell into an EKS pod via kubectl.
   --namespace, -n Kubernetes namespace
   --pod           pod name (running pods only)
   --container, -c container name within the pod
+
+EXAMPLES
+  ssm pod                                       fully interactive
+  ssm pod --env staging                         skips the account menu
+  ssm pod --env staging --cluster sc-staging-eks
+  ssm pod --env staging -n default              skips the namespace menu
+  ssm pod --env staging -n default --pod api-7d9f
+  ssm pod --env staging -n default --pod api-7d9f -c sidecar
 EOF
       ;;
     db)
@@ -1325,6 +1480,16 @@ ssm db — Open an RDS tunnel via SSM port forwarding.
   --app         App tag                          (default: pick from a menu)
   --db          RDS DBInstanceIdentifier
   --instance    EC2 instance to tunnel through   (default: the first one found)
+
+The local port is assigned on first use and remembered in ~/.ssm/config.json.
+Change it with `ssm config edit --env <name> --db <id> --port <n>`.
+
+EXAMPLES
+  ssm db                                        fully interactive
+  ssm db --env staging                          skips the account menu
+  ssm db --env staging --app adam               no prompts if the app has one database
+  ssm db --env staging --app adam --db sc-staging-adam-rds
+  ssm db --env staging --app adam --db sc-staging-adam-rds --instance web-01
 EOF
       ;;
     config)
@@ -1336,12 +1501,34 @@ ssm config — Manage account profiles and AWS CLI credentials.
   ssm config view   [--env <name>]
   ssm config add    --env <name> [--profile <p>] [--region <r>]
                     [--access-key <k>] [--secret-key -] [--skip-credentials]
-  ssm config edit   --env <name> [--profile <p>] [--region <r>]
+                    [--force]
+  ssm config edit   --env <name> [--name <new>] [--profile <p>] [--region <r>]
                     [--access-key <k>] [--secret-key -]
+                    [--db <id> --port <n>]
   ssm config delete --env <name> [--yes] [--delete-profile]
+  ssm config delete --env <name> --db <id> [--yes]
 
+  --name            rename the account; keeps its region and db ports, and does
+                    not touch the AWS CLI profile
+  --db, --port      set the local tunnel port for one database (both required)
+  --force           let `add` replace an account that already exists
   --yes             skip the delete confirmation
   --delete-profile  also remove the profile from ~/.aws/credentials and config
+
+EXAMPLES
+  ssm config                                    pick an action from a menu
+  ssm config view                               every account
+  ssm config view --env staging                 one account
+  ssm config add --env staging --profile sc-staging --region ap-southeast-5
+  ssm config add --env staging --profile sc-staging --region ap-southeast-5 \
+    --skip-credentials                          config only, no AWS CLI setup
+  SSM_AWS_SECRET_KEY=... ssm config add --env staging --profile sc-staging \
+    --region ap-southeast-5 --access-key AKIA...
+  ssm config edit --env staging --region ap-southeast-1
+  ssm config edit --env staging --name stg      rename the account
+  ssm config edit --env staging --db sc-staging-adam-rds --port 15433
+  ssm config delete --env staging --db sc-staging-adam-rds --yes
+  ssm config delete --env staging --yes --delete-profile
 
 Never pass a secret as a flag value -- it lands in your shell history. Set
 SSM_AWS_SECRET_KEY=... or use '--secret-key -' to read one line from stdin.
@@ -1377,19 +1564,29 @@ FLAGS
                [--pod <name>] [-c <container>]
   ssm db       [--env <name>] [--app <name>] [--db <identifier>]
                [--instance <id|Name>]
-  ssm config   [view|add|edit|delete] [flags]
+  ssm config   [view|add|edit|delete] [--env <name>] [--name <new>]
+               [--profile <p>] [--region <r>] [--db <id> --port <n>]
+               [--access-key <k>] [--secret-key -] [--skip-credentials]
+               [--force] [--yes] [--delete-profile]
 
 EXAMPLES
   ssm ssh                                     fully interactive, as before
   ssm ssh --env staging                       skips the account menu
   ssm ssh --env staging --app adam            no prompts if the app has one instance
   ssm ssh --env staging --app adam --container php-fpm
+  ssm ssh --env staging --instance web-01     match an EC2 Name tag or id
   ssm db  --env staging --app adam --db sc-staging-adam-rds
   ssm pod --env staging -n default --pod api-7d9f
+  ssm config view --env staging
   ssm config add --env staging --profile sc-staging --region ap-southeast-5
+  ssm config edit --env staging --name stg --region ap-southeast-1
+  ssm config edit --env staging --db sc-staging-adam-rds --port 15433
+  ssm config delete --env staging --yes --delete-profile
 
   A value that does not exist is an error listing the valid ones, so a fully
   flagged command never stops to ask a question.
+
+  Run `ssm <command> --help` for that command's full flag list and examples.
 
 SECRETS
   Never pass a secret key as a flag value -- it is recorded in your shell
