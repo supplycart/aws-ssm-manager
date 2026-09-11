@@ -49,6 +49,17 @@ docs_upload_plan() {
         continue
         ;;
     esac
+    # The CDN answers 403 to a URL with a literal @ in the path, and a browser
+    # asking for a file by name does not percent-encode it, so such a file
+    # uploads fine and is then unreachable. Keep every key to characters that
+    # survive the trip: letters, digits, dot, dash, underscore and /.
+    case "$rel" in
+      *[!A-Za-z0-9./_-]*)
+        echo "Error: $rel has a character the CDN will not serve by that name" >&2
+        failed=1
+        continue
+        ;;
+    esac
     if ! type=$(docs_content_type "$rel"); then
       echo "Error: no content type for $rel" >&2
       failed=1

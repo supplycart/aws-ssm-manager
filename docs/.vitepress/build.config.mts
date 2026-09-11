@@ -15,4 +15,22 @@ export default defineConfig({
    * links keep their .html extension.
    */
   cleanUrls: false,
+
+  vite: {
+    build: {
+      rollupOptions: {
+        output: {
+          /**
+           * Local search builds a chunk named after the virtual module
+           * `@localSearchIndex`, and the CDN answers 403 to a URL with a literal
+           * `@` in the path, so the browser cannot load it. Renaming the chunk
+           * here rather than after the build means rollup writes the new name
+           * into every reference itself.
+           */
+          chunkFileNames: (chunk) =>
+            `assets/chunks/${(chunk.name || 'chunk').replace(/[^\w.-]/g, '_')}.[hash].js`,
+        },
+      },
+    },
+  },
 })

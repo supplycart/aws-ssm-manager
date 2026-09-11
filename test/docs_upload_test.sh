@@ -53,10 +53,10 @@ DIST=$(mktemp -d)
 mkdir -p "$DIST/assets/chunks" "$DIST/commands"
 touch "$DIST/index.html" "$DIST/install.html" "$DIST/commands/ssh.html" \
   "$DIST/assets/app.B1x.js" "$DIST/assets/style.C2z.css" \
-  "$DIST/assets/chunks/@localSearchIndexroot.D3y.js" "$DIST/supplycart.png"
+  "$DIST/assets/chunks/_localSearchIndexroot.D3y.js" "$DIST/supplycart.png"
 
 EXPECTED="assets/app.B1x.js${TAB}text/javascript; charset=utf-8
-assets/chunks/@localSearchIndexroot.D3y.js${TAB}text/javascript; charset=utf-8
+assets/chunks/_localSearchIndexroot.D3y.js${TAB}text/javascript; charset=utf-8
 assets/style.C2z.css${TAB}text/css; charset=utf-8
 supplycart.png${TAB}image/png
 commands/ssh.html${TAB}text/html; charset=utf-8
@@ -84,6 +84,17 @@ touch "$DIST/assets/app.B1x.js.map"
 assert_status 1 "a file with no known type is refused" docs_upload_plan "$DIST"
 assert_contains "no content type for assets/app.B1x.js.map" "$LAST_OUTPUT" "unknown type message"
 rm "$DIST/assets/app.B1x.js.map"
+
+# A literal @ in the path is a 403 from the CDN, so such a build never ships:
+# the file would upload and then be unreachable by the name the page asks for.
+touch "$DIST/assets/chunks/@localSearchIndexroot.D3y.js"
+assert_status 1 "an @ in a filename is refused" docs_upload_plan "$DIST"
+assert_contains "the CDN will not serve by that name" "$LAST_OUTPUT" "unsafe character message"
+rm "$DIST/assets/chunks/@localSearchIndexroot.D3y.js"
+
+touch "$DIST/assets/a b.js"
+assert_status 1 "a space in a filename is refused" docs_upload_plan "$DIST"
+rm "$DIST/assets/a b.js"
 
 assert_status 0 "the cleaned-up build is accepted again" docs_upload_plan "$DIST"
 assert_status 1 "a missing directory is refused" docs_upload_plan "$DIST/missing"
