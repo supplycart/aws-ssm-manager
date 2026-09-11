@@ -1399,20 +1399,37 @@ config_edit() {
   esac
 }
 
+# Downloads to a temp file and renames it into place. The rename matters: bash
+# reads a script lazily, seeking back to its last offset after every command, so
+# truncating this file while it is running makes bash resume inside the *new*
+# bytes and die on a bogus syntax error. A rename gives the new script a new
+# inode and leaves the running one readable until it exits.
 cmd_update() {
   parse_args "" "" "$@" || exit 1
 
   local SSM_SCRIPT="$HOME/.ssm/ssm.sh"
   local CDN_URL="https://cdn.supplycart.my/shells/ssm.sh"
+  local tmp="$SSM_SCRIPT.new.$$"
+
+  trap 'rm -f "$tmp"' EXIT
 
   echo "Downloading latest ssm.sh from CDN..."
-  if curl -fsSL "$CDN_URL" -o "$SSM_SCRIPT"; then
-    chmod +x "$SSM_SCRIPT"
-    echo "ssm updated successfully."
-  else
+  if ! curl -fsSL "$CDN_URL" -o "$tmp"; then
     echo "Update failed. Could not download from $CDN_URL" >&2
     exit 1
   fi
+
+  # A truncated download would otherwise replace a working ssm with one that
+  # cannot even run 'ssm update' again. bash 3.2 does not flag an unterminated
+  # heredoc, so check the shebang too -- between them they catch a short read.
+  if [ "$(head -c 2 "$tmp")" != "#!" ] || ! bash -n "$tmp" 2>/dev/null; then
+    echo "Update failed. The download from $CDN_URL is not a valid script." >&2
+    exit 1
+  fi
+
+  chmod +x "$tmp"
+  mv "$tmp" "$SSM_SCRIPT"
+  echo "ssm updated successfully."
 }
 
 # Per-command usage. `ssm help` prints all of it; `ssm <cmd> --help` prints one
