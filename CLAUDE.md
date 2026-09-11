@@ -6,9 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - `bash install.sh` — install dependencies and symlink `ssm` to `/usr/local/bin/ssm` on macOS
 - `ssm ssh / ssm pod / ssm db / ssm config / ssm update / ssm uninstall / ssm version / ssm help` — end-user CLI commands
-- `bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh` — syntax check before committing
-- `bash test/args_test.sh && bash test/release_test.sh` — unit tests for the argument and release
-  helpers; run with the syntax check. CI runs the same pair as the required `test` check
+- `bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh && bash -n .github/scripts/docs_upload.sh` — syntax check before committing
+- `bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh`
+  — unit tests for the argument, release, installer-version and docs-upload helpers; run with the
+  syntax check. CI runs the same four as the required `test` check
+- `cd docs && pnpm install && pnpm dev` — docs site at `http://localhost:5173/shells/aws-ssm-manager/`;
+  `pnpm format` before committing (CI runs `pnpm format:check` and `pnpm build`)
 
 ## Architecture
 
@@ -63,6 +66,33 @@ tests can source the script without running a command.
 `ssm.sh` is served from the CDN (`https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh`), downloaded to
 `~/.ssm/ssm.sh` by `install.sh`, and made available as a system command via a symlink at
 `/usr/local/bin/ssm`. `ssm update` re-downloads from the same URL.
+
+`install.sh [vX.Y.Z]` installs that release from `shells/aws-ssm-manager/vX.Y.Z/ssm.sh`, or the
+latest with no argument. `ssm_script_url` builds the URL and refuses anything but a plain tag; it
+sits above a `(return 0 2>/dev/null)` source guard, so `test/install_test.sh` can source the file
+without installing. `return` outside a function only succeeds in a sourced file, so the guard
+lets both `bash install.sh` and the documented `bash <(curl …)` (a `/dev/fd` path) run through.
+Validation and the CDN existence check run before the stdin and sudo checks, so a bad version
+fails before anything is installed.
+
+`docs/` is the VitePress docs site, laid out like `supplycart/wiki`: config split across
+`docs/.vitepress/*.config.mts`, pages in `docs/src/`, sidebar in `docs/src/sidebar.mts`, and every
+page needs `title`/`description` frontmatter plus a sidebar entry. `.github/workflows/docs.yml`
+uploads the build into R2 under `shells/aws-ssm-manager/`, beside the release scripts, which
+drives three constraints:
+
+- `base` is `/shells/aws-ssm-manager/` and `cleanUrls` is off. R2 has no index document, so links
+  name a page (`/commands/overview`), never a folder.
+- `docs_upload_plan` in `.github/scripts/docs_upload.sh` (tested by `test/docs_upload_test.sh`)
+  gives every file an explicit content type, since the CDN sends `nosniff`; add an extension there
+  before the build starts emitting it. It lists pages after assets and refuses any build holding a
+  `.sh` file or a `vX.Y.Z/` folder. Nothing in the docs deploy deletes.
+- A redirect rule on the `supplycart.my` zone, managed in the Cloudflare dashboard, sends exactly
+  `/shells/aws-ssm-manager` and `/shells/aws-ssm-manager/` to `index.html`. Never widen it to a
+  prefix match: that would redirect `install.sh` and `ssm update`.
+
+`VersionPicker.vue` on the install page reads releases from the GitHub API in the browser, so a
+release needs no docs deploy. Its CDN URL must match `install.sh`.
 
 `.github/workflows/deploy.yml` releases every push to `master` once the reusable `test.yml` passes:
 1. Picks the next `vX.Y.Z` from the last tag and the merged PR's `release:minor` / `release:major` label.

@@ -19,7 +19,7 @@ jobs:
               uses: actions/checkout@v6
 
             - name: Syntax check
-              run: bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh
+              run: bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh && bash -n .github/scripts/docs_upload.sh
 
             - name: Unit tests
-              run: bash test/args_test.sh && bash test/release_test.sh
+              run: bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh
