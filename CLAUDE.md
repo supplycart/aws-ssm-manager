@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `bash install.sh` — install dependencies and symlink `ssm` to `/usr/local/bin/ssm` on macOS
 - `ssm ssh / ssm pod / ssm db / ssm config / ssm update / ssm uninstall / ssm version / ssm help` — end-user CLI commands
 - `bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh` — syntax check before committing
-- `bash test/args_test.sh && bash test/release_test.sh` — unit tests for the argument and release
-  helpers; run with the syntax check. CI runs the same pair as the required `test` check
+- `bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh` — unit tests
+  for the argument, release and installer-version helpers; run with the syntax check. CI runs the
+  same three as the required `test` check
 
 ## Architecture
 
@@ -63,6 +64,18 @@ tests can source the script without running a command.
 `ssm.sh` is served from the CDN (`https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh`), downloaded to
 `~/.ssm/ssm.sh` by `install.sh`, and made available as a system command via a symlink at
 `/usr/local/bin/ssm`. `ssm update` re-downloads from the same URL.
+
+`install.sh [vX.Y.Z]` installs that release from `shells/aws-ssm-manager/vX.Y.Z/ssm.sh`, or the
+latest with no argument. `ssm_script_url` builds the URL and refuses anything but a plain tag; it
+sits above a `(return 0 2>/dev/null)` source guard, so `test/install_test.sh` can source the file
+without installing. `return` outside a function only succeeds in a sourced file, so the guard
+lets both `bash install.sh` and the documented `bash <(curl …)` (a `/dev/fd` path) run through.
+Validation and the CDN existence check run before the stdin and sudo checks, so a bad version
+fails before anything is installed.
+
+`docs/index.html` is the GitHub Pages install page (Settings → Pages → `master` `/docs`, managed in
+the UI like the rulesets). It is static: the version list comes from the GitHub releases API at
+page load, so releases need no Pages deploy. Its CDN URL must match `install.sh`.
 
 `.github/workflows/deploy.yml` releases every push to `master` once the reusable `test.yml` passes:
 1. Picks the next `vX.Y.Z` from the last tag and the merged PR's `release:minor` / `release:major` label.

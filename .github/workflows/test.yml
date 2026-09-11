@@ -22,4 +22,4 @@ jobs:
               run: bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh
 
             - name: Unit tests
-              run: bash test/args_test.sh && bash test/release_test.sh
+              run: bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh

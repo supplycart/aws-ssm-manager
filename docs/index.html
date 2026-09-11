@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ssm — install</title>
+<meta name="description" content="Install ssm: connect to EC2, ECS, EKS and RDS through AWS SSM, without a bastion host.">
+<style>
+  :root {
+    --bg: #fbfbfa;
+    --surface: #ffffff;
+    --text: #1d1d1f;
+    --muted: #5f6368;
+    --border: #e3e3e0;
+    --accent: #d05a00;
+    --code-bg: #16181d;
+    --code-text: #e8e8e3;
+    --code-muted: #8b919c;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111214;
+      --surface: #191b1f;
+      --text: #ececec;
+      --muted: #9aa0a6;
+      --border: #2c2f35;
+      --accent: #ff8a3d;
+      --code-bg: #0b0c0e;
+      --code-text: #e8e8e3;
+      --code-muted: #7d838d;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding-inline: 20px;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding-block: 56px 72px; }
+  a { color: var(--accent); }
+  h1 { font: 700 40px/1.1 var(--mono); margin: 0 0 12px; letter-spacing: -0.02em; }
+  h2 { font-size: 20px; margin: 48px 0 12px; }
+  p { margin: 0 0 12px; }
+  .lede { font-size: 18px; color: var(--muted); margin-bottom: 20px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .tag {
+    font-size: 13px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  }
+  .tag strong { color: var(--text); font-weight: 600; }
+  .tags a { font-size: 14px; margin-left: 4px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px;
+  }
+  .picker { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-bottom: 14px; }
+  .picker label { font-weight: 600; }
+  select {
+    font: inherit; font-size: 15px; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; min-width: 0; max-width: 100%;
+  }
+  .picker a { font-size: 14px; margin-left: auto; }
+
+  .cmd {
+    display: flex; align-items: stretch; background: var(--code-bg);
+    border-radius: 8px; overflow: hidden;
+  }
+  pre {
+    margin: 0; padding: 14px 16px; overflow-x: auto; flex: 1; min-width: 0;
+    font: 14px/1.55 var(--mono); color: var(--code-text); background: var(--code-bg);
+  }
+  /* The install command wraps so the whole thing is visible before it is pasted. */
+  .cmd pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cmd pre::before { content: "$ "; color: var(--code-muted); }
+  pre.block { border-radius: 8px; }
+  .comment { color: var(--code-muted); }
+  button.copy {
+    font: 600 13px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    border: 0; border-left: 1px solid #2c2f35; padding: 0 16px; cursor: pointer;
+    background: transparent; color: var(--code-text); flex: none;
+  }
+  button.copy:hover, button.copy:focus-visible { background: #22252b; }
+  .note { font-size: 14px; color: var(--muted); margin: 12px 0 0; }
+  .note code, li code, p code {
+    font: 0.9em var(--mono); background: var(--bg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 4px; white-space: nowrap;
+  }
+  ul { padding-left: 20px; margin: 0 0 12px; }
+  li { margin-bottom: 4px; }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 14px; color: var(--muted); }
+  footer a { margin-right: 16px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ssm</h1>
+    <p class="lede">Connect to EC2 instances, ECS containers, EKS pods and RDS databases through AWS
+      Systems Manager, with no bastion host or open SSH ports.</p>
+    <div class="tags">
+      <span class="tag"><strong>macOS only</strong> · Apple Silicon &amp; Intel</span>
+      <a href="https://github.com/supplycart/aws-ssm-manager">GitHub</a>
+    </div>
+  </header>
+
+  <section>
+    <h2>Install</h2>
+    <div class="card">
+      <div class="picker">
+        <label for="version">Version</label>
+        <select id="version" disabled>
+          <option value="">Latest</option>
+        </select>
+        <a id="notes" href="https://github.com/supplycart/aws-ssm-manager/releases" hidden>Release notes</a>
+      </div>
+      <div class="cmd">
+        <pre><code id="command">bash &lt;(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)</code></pre>
+        <button class="copy" id="copy" type="button">Copy</button>
+      </div>
+      <p class="note" id="pinned" hidden></p>
+      <p class="note" id="status">Loading versions…</p>
+    </div>
+    <p class="note">Run it in Terminal. It asks for your password once, for the AWS installers and the
+      <code>/usr/local/bin/ssm</code> link. Use <code>bash &lt;(curl …)</code> as shown:
+      <code>curl … | bash</code> takes over the terminal's input and the password prompt can't work.</p>
+  </section>
+
+  <section>
+    <h2>What gets installed</h2>
+    <ul>
+      <li>Homebrew, if it isn't there already</li>
+      <li><code>fzf</code>, <code>jq</code> and <code>kubectl</code> from Homebrew</li>
+      <li>AWS CLI v2 and the AWS Session Manager plugin</li>
+      <li><code>~/.ssm/ssm.sh</code>, linked as <code>/usr/local/bin/ssm</code>, plus an empty <code>~/.ssm/config.json</code></li>
+    </ul>
+    <p>Anything already installed is left as it is, so running the installer again is safe.</p>
+  </section>
+
+  <section>
+    <h2>Configure</h2>
+    <p>Add an AWS account. This writes <code>~/.ssm/config.json</code> and your AWS CLI credentials:</p>
+    <pre class="block"><code>ssm config   <span class="comment"># → add → account name, AWS profile, region, access keys</span></code></pre>
+  </section>
+
+  <section>
+    <h2>Use</h2>
+    <pre class="block"><code>ssm ssh        <span class="comment"># shell into an EC2 instance or ECS/Fargate container</span>
+ssm pod        <span class="comment"># shell into an EKS pod</span>
+ssm db         <span class="comment"># open an RDS tunnel</span>
+ssm update     <span class="comment"># update to the latest version</span>
+ssm version    <span class="comment"># print the installed version</span>
+ssm uninstall  <span class="comment"># remove ssm, and optionally its config and dependencies</span></code></pre>
+    <p class="note">Every menu has a flag, e.g. <code>ssm ssh --env staging --app adam</code>. Flags, IAM
+      permissions and required tags are in the
+      <a href="https://github.com/supplycart/aws-ssm-manager#readme">README</a>.</p>
+  </section>
+
+  <footer>
+    <a href="https://github.com/supplycart/aws-ssm-manager">Source</a>
+    <a href="https://github.com/supplycart/aws-ssm-manager/releases">Releases</a>
+  </footer>
+</main>
+
+<script>
+(function () {
+  var INSTALL_URL = "https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh";
+  var RELEASES_API = "https://api.github.com/repos/supplycart/aws-ssm-manager/releases?per_page=100";
+  var RELEASES_PAGE = "https://github.com/supplycart/aws-ssm-manager/releases";
+  // Only plain release tags reach the command, since it is pasted into a shell.
+  var TAG_RE = /^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+
+  var select = document.getElementById("version");
+  var command = document.getElementById("command");
+  var notes = document.getElementById("notes");
+  var pinned = document.getElementById("pinned");
+  var status = document.getElementById("status");
+  var copy = document.getElementById("copy");
+  var releases = [];
+
+  function commandFor(tag) {
+    return "bash <(curl -fsSL " + INSTALL_URL + ")" + (tag ? " " + tag : "");
+  }
+
+  function parts(tag) {
+    return tag.slice(1).split(".").map(Number);
+  }
+
+  function newestFirst(a, b) {
+    var x = parts(a.tag), y = parts(b.tag);
+    for (var i = 0; i < 3; i++) {
+      if (x[i] !== y[i]) return y[i] - x[i];
+    }
+    return 0;
+  }
+
+  function formatDate(iso) {
+    var d = new Date(iso);
+    return isNaN(d) ? "" : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+  }
+
+  function render() {
+    var tag = select.value;
+    command.textContent = commandFor(tag);
+
+    var release = tag ? releases.filter(function (r) { return r.tag === tag; })[0] : releases[0];
+    notes.hidden = !release;
+    if (release) notes.href = release.url;
+
+    pinned.hidden = !tag;
+    if (tag) {
+      pinned.textContent = "Installs " + tag + " exactly. Running ssm update later moves it to the latest version.";
+    }
+  }
+
+  function showFallback() {
+    status.textContent = "";
+    status.appendChild(document.createTextNode("Couldn't load the version list, so only the latest is shown. Older versions are on the "));
+    var link = document.createElement("a");
+    link.href = RELEASES_PAGE;
+    link.textContent = "releases page";
+    status.appendChild(link);
+    status.appendChild(document.createTextNode(": add the tag after the command, e.g. … install.sh) v1.0.0"));
+  }
+
+  fetch(RELEASES_API, { headers: { Accept: "application/vnd.github+json" } })
+    .then(function (res) {
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      return res.json();
+    })
+    .then(function (data) {
+      releases = data
+        .filter(function (r) { return !r.draft && !r.prerelease && TAG_RE.test(r.tag_name); })
+        .map(function (r) { return { tag: r.tag_name, url: r.html_url, date: r.published_at }; })
+        .sort(newestFirst);
+      if (!releases.length) throw new Error("no releases");
+
+      select.options[0].textContent = "Latest (" + releases[0].tag + ")";
+      releases.forEach(function (r) {
+        var option = document.createElement("option");
+        option.value = r.tag;
+        var date = formatDate(r.date);
+        option.textContent = r.tag + (date ? " — " + date : "");
+        select.appendChild(option);
+      });
+      select.disabled = false;
+      status.hidden = true;
+      render();
+    })
+    .catch(showFallback);
+
+  select.addEventListener("change", render);
+
+  copy.addEventListener("click", function () {
+    var text = command.textContent;
+    function done(label) {
+      copy.textContent = label;
+      setTimeout(function () { copy.textContent = "Copy"; }, 1500);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { done("Copied"); }, selectCommand);
+    } else {
+      selectCommand();
+    }
+    function selectCommand() {
+      var range = document.createRange();
+      range.selectNodeContents(command);
+      var selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      done("Press ⌘C");
+    }
+  });
+})();
+</script>
+</body>
+</html>

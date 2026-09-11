@@ -26,6 +26,15 @@ flags.
 bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)
 ```
 
+To install a specific version, add its tag. [supplycart.github.io/aws-ssm-manager](https://supplycart.github.io/aws-ssm-manager/)
+lists every release with its command:
+
+```bash
+bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.1.0
+```
+
+A pinned install stays on that version until `ssm update`, which moves it to the latest.
+
 This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and creates a symlink at `/usr/local/bin/ssm` pointing to `~/.ssm/ssm.sh`. The `ssm` command is available immediately in any new shell — no `source ~/.zshrc` needed.
 
 ### 2. Configure
@@ -358,7 +367,7 @@ Run the same checks CI runs before opening a PR:
 
 ```bash
 bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh
-bash test/args_test.sh && bash test/release_test.sh
+bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh
 ```
 
 ### Releases
@@ -382,15 +391,17 @@ A failed run can be re-run: it finds the tag it already pushed for that commit a
 from there. Running the workflow by hand from `master` releases the latest commit if it has not
 been tagged yet, with the `bump` input taking the place of the PR labels.
 
-Every version stays on the CDN, so an older one can be installed directly:
+Every version stays on the CDN, so `install.sh` installs any of them when given the tag. It
+checks the version exists before installing anything:
 
 ```bash
-curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/v1.2.3/ssm.sh -o ~/.ssm/ssm.sh
-chmod +x ~/.ssm/ssm.sh
+bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.2.3
 ssm version   # ssm v1.2.3
 ```
 
-`shells/aws-ssm-manager/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
+The [install page](https://supplycart.github.io/aws-ssm-manager/) is `docs/index.html`, served by
+GitHub Pages from `master` `/docs` (set under **Settings → Pages**). It reads the release list from
+the GitHub API in the browser, so a new release shows up there without a deploy.
 
 Up to v1.1.0 the scripts lived directly under `shells/`, and installs from then still run
 `ssm update` against `shells/ssm.sh`. So every release also writes the latest `ssm.sh` and

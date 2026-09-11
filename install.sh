@@ -1,4 +1,30 @@
 #!/bin/bash
+# Installs ssm and its dependencies on macOS.
+#
+#   bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)          # latest
+#   bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.1.0   # pinned
+
+# ssm_script_url <latest|vX.Y.Z>
+# Prints the CDN URL of that ssm.sh. Every release keeps its own copy under
+# shells/aws-ssm-manager/vX.Y.Z/, so any released version can be installed.
+# Anything but a plain release tag is refused, since it ends up in a URL.
+ssm_script_url() {
+  local version="$1"
+  local tag_re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+
+  if [[ "$version" == "latest" ]]; then
+    echo "https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh"
+  elif [[ "$version" =~ $tag_re ]]; then
+    echo "https://cdn.supplycart.my/shells/aws-ssm-manager/$version/ssm.sh"
+  else
+    echo "Error: '$version' is not a version. Pass a release tag such as v1.1.0, or nothing for the latest." >&2
+    return 1
+  fi
+}
+
+# test/install_test.sh sources this file for the helper above; stop before
+# installing anything. `return` only succeeds when the file is being sourced.
+if (return 0 2>/dev/null); then return 0; fi
 
 set -e
 
@@ -17,11 +43,26 @@ if [[ "$(uname)" != "Darwin" ]]; then
   error "This script only supports macOS."
 fi
 
+# The version is checked before anything is installed, so a typo fails here
+# rather than after Homebrew and the AWS CLI are already on the machine.
+if [[ $# -gt 1 ]]; then
+  error "Usage: install.sh [vX.Y.Z]"
+fi
+SSM_INSTALL_VERSION="${1:-latest}"
+SSM_URL=$(ssm_script_url "$SSM_INSTALL_VERSION") || exit 1
+
+ssm_status=$(curl -sIL -o /dev/null -w '%{http_code}' "$SSM_URL" || true)
+case "$ssm_status" in
+  200) ;;
+  403|404) error "ssm $SSM_INSTALL_VERSION does not exist. Released versions: https://github.com/supplycart/aws-ssm-manager/releases" ;;
+  *) error "Could not reach $SSM_URL (HTTP ${ssm_status:-no response}). Check your connection and try again." ;;
+esac
+
 if [[ ! -t 0 ]]; then
   error "stdin is not a terminal — this almost always means you ran 'curl ... | bash'.
 That pattern breaks sudo prompts. Re-run with one of:
-  bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)
-  curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh -o /tmp/install.sh && bash /tmp/install.sh"
+  bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)${1:+ $1}
+  curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh -o /tmp/install.sh && bash /tmp/install.sh${1:+ $1}"
 fi
 
 info "Requesting sudo password (used for installer + symlink — asked once, reused)..."
@@ -117,10 +158,11 @@ CONFIG_FILE="$SSM_DIR/config.json"
 
 [[ ! -d "$SSM_DIR" ]] && mkdir -p "$SSM_DIR"
 
-info "Downloading ssm.sh..."
-curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh -o "$SSM_SCRIPT"
+info "Downloading ssm.sh ($SSM_INSTALL_VERSION)..."
+curl -fsSL "$SSM_URL" -o "$SSM_SCRIPT"
 chmod +x "$SSM_SCRIPT"
-success "ssm.sh downloaded to $SSM_SCRIPT"
+SSM_INSTALLED_VERSION=$(sed -n 's/^SSM_VERSION="\(.*\)"$/\1/p' "$SSM_SCRIPT" | sed -n 1p)
+success "ssm ${SSM_INSTALLED_VERSION:-(unversioned)} downloaded to $SSM_SCRIPT"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
   echo '{}' > "$CONFIG_FILE"
@@ -140,4 +182,7 @@ else
 fi
 
 echo ""
+if [[ "$SSM_INSTALL_VERSION" != "latest" ]]; then
+  warn "Pinned to $SSM_INSTALL_VERSION. 'ssm update' moves this install to the latest version."
+fi
 success "All done. Fill in ~/.ssm/config.json, then run 'ssm help'."
