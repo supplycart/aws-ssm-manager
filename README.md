@@ -23,7 +23,7 @@ flags.
 ### 1. Install
 
 ```bash
-bash <(curl -fsSL https://cdn.supplycart.my/shells/install.sh)
+bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)
 ```
 
 This installs `awscli`, `fzf`, `jq`, the AWS Session Manager plugin, and creates a symlink at `/usr/local/bin/ssm` pointing to `~/.ssm/ssm.sh`. The `ssm` command is available immediately in any new shell — no `source ~/.zshrc` needed.
@@ -373,9 +373,9 @@ Every merge is released by `.github/workflows/deploy.yml`:
    `vX.Y.Z`. The tag is protected from the moment it exists. The release commit is reachable only
    from the tag, so `master` always reads `SSM_VERSION="dev"`.
 3. **Upload.** `ssm.sh` and `install.sh` go to the `supplycart-cdn` R2 bucket, first under
-   `shells/vX.Y.Z/` and then under `shells/`, which is what `ssm update` and the install command
-   fetch. Those unversioned URLs are hard-coded in `install.sh` and in `ssm update`, so changing
-   them breaks every existing install.
+   `shells/aws-ssm-manager/vX.Y.Z/` and then under `shells/aws-ssm-manager/`, which is what
+   `ssm update` and the install command fetch. Those URLs are hard-coded in `install.sh` and in
+   `ssm update`, so moving them needs a migration like the one described below.
 4. **Release.** A GitHub release `vX.Y.Z` with generated notes and both scripts attached.
 
 A failed run can be re-run: it finds the tag it already pushed for that commit and carries on
@@ -385,12 +385,18 @@ been tagged yet, with the `bump` input taking the place of the PR labels.
 Every version stays on the CDN, so an older one can be installed directly:
 
 ```bash
-curl -fsSL https://cdn.supplycart.my/shells/v1.2.3/ssm.sh -o ~/.ssm/ssm.sh
+curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/v1.2.3/ssm.sh -o ~/.ssm/ssm.sh
 chmod +x ~/.ssm/ssm.sh
 ssm version   # ssm v1.2.3
 ```
 
-`shells/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
+`shells/aws-ssm-manager/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
+
+Up to v1.1.0 the scripts lived directly under `shells/`, and installs from then still run
+`ssm update` against `shells/ssm.sh`. So every release also writes the latest `ssm.sh` and
+`install.sh` to `shells/`. An old install's next `ssm update` picks up the new URL and never
+reads the old path again. The releases made before the move are copied from `shells/vX.Y.Z/`
+into `shells/aws-ssm-manager/vX.Y.Z/`, and the originals remain where they were.
 
 Publishing requires a `Production` environment on this repo with the variables
 `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secret
@@ -400,7 +406,7 @@ Publishing requires a `Production` environment on this repo with the variables
 To verify a release reached the CDN:
 
 ```bash
-curl -fsSL https://cdn.supplycart.my/shells/ssm.sh | grep '^SSM_VERSION='
+curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh | grep '^SSM_VERSION='
 gh release view --json tagName --jq .tagName   # must match
 ```
 

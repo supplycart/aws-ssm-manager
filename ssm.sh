@@ -1441,7 +1441,7 @@ cmd_update() {
   parse_args "" "" "$@" || exit 1
 
   local SSM_SCRIPT="$HOME/.ssm/ssm.sh"
-  local CDN_URL="https://cdn.supplycart.my/shells/ssm.sh"
+  local CDN_URL="https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh"
   local tmp="$SSM_SCRIPT.new.$$"
 
   trap 'rm -f "$tmp"' EXIT

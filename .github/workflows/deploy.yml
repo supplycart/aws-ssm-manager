@@ -120,17 +120,37 @@ jobs:
                   VERSION: ${{ steps.version.outputs.version }}
               run: git checkout --detach "refs/tags/$VERSION"
 
-            # The versioned copy goes up first, so shells/ never serves a
-            # version that has no copy of its own.
+            # The versioned copy goes up first, so the latest never serves a
+            # version that has no copy of its own. The scripts lived directly
+            # under shells/ until v1.1.0, and installs from then still run
+            # `ssm update` against shells/ssm.sh, so the latest is mirrored
+            # there too; their next update moves them to the new URL.
             - name: Upload to R2
               env:
                   VERSION: ${{ steps.version.outputs.version }}
               run: |
                   endpoint="https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
-                  for prefix in "shells/$VERSION" shells; do
+                  bucket="s3://$CLOUDFLARE_R2_CDN_BUCKET"
+                  prefix="shells/aws-ssm-manager"
+
+                  # Copy each release made under the old shells/vX.Y.Z/ layout into
+                  # the new one, skipping versions already copied. Nothing is
+                  # uploaded to the old versioned paths any more, so after the
+                  # first run this finds nothing left to do.
+                  old_versions=$(aws s3 ls "$bucket/shells/" --endpoint-url "$endpoint" |
+                    awk '$1 == "PRE" && $2 ~ /^v[0-9]+\.[0-9]+\.[0-9]+\/$/ { sub(/\/$/, "", $2); print $2 }')
+                  for old in $old_versions; do
+                    if ! aws s3 ls "$bucket/$prefix/$old/ssm.sh" --endpoint-url "$endpoint" >/dev/null; then
+                      for file in ssm.sh install.sh; do
+                        aws s3 cp "$bucket/shells/$old/$file" "$bucket/$prefix/$old/$file" \
+                          --endpoint-url "$endpoint"
+                      done
+                    fi
+                  done
+
+                  for dest in "$prefix/$VERSION" "$prefix" shells; do
                     for file in ssm.sh install.sh; do
-                      aws s3 cp "$file" "s3://$CLOUDFLARE_R2_CDN_BUCKET/$prefix/$file" \
-                        --endpoint-url "$endpoint"
+                      aws s3 cp "$file" "$bucket/$dest/$file" --endpoint-url "$endpoint"
                     done
                   done
 

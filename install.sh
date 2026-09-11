@@ -20,8 +20,8 @@ fi
 if [[ ! -t 0 ]]; then
   error "stdin is not a terminal — this almost always means you ran 'curl ... | bash'.
 That pattern breaks sudo prompts. Re-run with one of:
-  bash <(curl -fsSL https://cdn.supplycart.my/shells/install.sh)
-  curl -fsSL https://cdn.supplycart.my/shells/install.sh -o /tmp/install.sh && bash /tmp/install.sh"
+  bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)
+  curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh -o /tmp/install.sh && bash /tmp/install.sh"
 fi
 
 info "Requesting sudo password (used for installer + symlink — asked once, reused)..."
@@ -118,7 +118,7 @@ CONFIG_FILE="$SSM_DIR/config.json"
 [[ ! -d "$SSM_DIR" ]] && mkdir -p "$SSM_DIR"
 
 info "Downloading ssm.sh..."
-curl -fsSL https://cdn.supplycart.my/shells/ssm.sh -o "$SSM_SCRIPT"
+curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh -o "$SSM_SCRIPT"
 chmod +x "$SSM_SCRIPT"
 success "ssm.sh downloaded to $SSM_SCRIPT"
 
