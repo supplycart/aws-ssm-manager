@@ -53,7 +53,7 @@ tests can source the script without running a command.
 
 ## Distribution
 
-`ssm.sh` is served from the CDN (`https://cdn.supplycart.my/shells/ssm.sh`), downloaded to
+`ssm.sh` is served from the CDN (`https://cdn.supplycart.my/shells/aws-ssm-manager/ssm.sh`), downloaded to
 `~/.ssm/ssm.sh` by `install.sh`, and made available as a system command via a symlink at
 `/usr/local/bin/ssm`. `ssm update` re-downloads from the same URL.
 
@@ -61,7 +61,7 @@ tests can source the script without running a command.
 1. Picks the next `vX.Y.Z` from the last tag and the merged PR's `release:minor` / `release:major` label.
 2. Refuses to go on unless the tag ruleset is active.
 3. Stamps `SSM_VERSION` into `ssm.sh` on a commit reachable only from the new tag, and pushes that tag.
-4. Uploads `ssm.sh` and `install.sh` to the R2 bucket `supplycart-cdn`, first under `shells/vX.Y.Z/` and then under `shells/`.
+4. Uploads `ssm.sh` and `install.sh` to the R2 bucket `supplycart-cdn` under `shells/aws-ssm-manager/vX.Y.Z/`, then `shells/aws-ssm-manager/`, then the legacy `shells/` (see below).
 5. Publishes a GitHub release.
 
 The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/release_test.sh`).
@@ -80,3 +80,9 @@ The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/
 
 The CDN URLs are hard-coded in `install.sh` and in `cmd_update()` in `ssm.sh`. Do not change them
 without a migration plan — already-installed clients pull updates from those exact paths.
+
+The scripts moved from `shells/` to `shells/aws-ssm-manager/` after v1.0.0, to leave room for
+other shells. Installs from before the move still update from `shells/ssm.sh`, so the deploy
+keeps mirroring the latest `ssm.sh` and `install.sh` to `shells/`. Don't remove that mirror while
+such installs may still exist. The deploy also copies `shells/v1.0.0/` into the new layout once,
+skipping it when the copy already exists.

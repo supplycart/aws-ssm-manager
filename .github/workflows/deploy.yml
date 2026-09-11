@@ -120,17 +120,30 @@ jobs:
                   VERSION: ${{ steps.version.outputs.version }}
               run: git checkout --detach "refs/tags/$VERSION"
 
-            # The versioned copy goes up first, so shells/ never serves a
-            # version that has no copy of its own.
+            # The versioned copy goes up first, so the latest never serves a
+            # version that has no copy of its own. The scripts lived directly
+            # under shells/ until v1.0.0, and installs from then still run
+            # `ssm update` against shells/ssm.sh, so the latest is mirrored
+            # there too; their next update moves them to the new URL.
             - name: Upload to R2
               env:
                   VERSION: ${{ steps.version.outputs.version }}
               run: |
                   endpoint="https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
-                  for prefix in "shells/$VERSION" shells; do
+                  bucket="s3://$CLOUDFLARE_R2_CDN_BUCKET"
+                  prefix="shells/aws-ssm-manager"
+
+                  # One-time copy of v1.0.0, released before this layout existed.
+                  if ! aws s3 ls "$bucket/$prefix/v1.0.0/ssm.sh" --endpoint-url "$endpoint" >/dev/null; then
                     for file in ssm.sh install.sh; do
-                      aws s3 cp "$file" "s3://$CLOUDFLARE_R2_CDN_BUCKET/$prefix/$file" \
+                      aws s3 cp "$bucket/shells/v1.0.0/$file" "$bucket/$prefix/v1.0.0/$file" \
                         --endpoint-url "$endpoint"
+                    done
+                  fi
+
+                  for dest in "$prefix/$VERSION" "$prefix" shells; do
+                    for file in ssm.sh install.sh; do
+                      aws s3 cp "$file" "$bucket/$dest/$file" --endpoint-url "$endpoint"
                     done
                   done
 
