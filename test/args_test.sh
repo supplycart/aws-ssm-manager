@@ -271,6 +271,19 @@ assert_contains "no port assignment" "$LAST_OUTPUT" "unknown db message"
 
 rm -f "$CONFIG_FIXTURE"
 
+echo "version"
+
+assert_eq "dev" "$(script_version "$HERE/../ssm.sh")" "the repository copy is unstamped"
+assert_eq "ssm dev" "$(bash "$HERE/../ssm.sh" version)" "ssm version"
+assert_eq "ssm dev" "$(bash "$HERE/../ssm.sh" --version)" "ssm --version"
+assert_status 1 "ssm version takes no flags" bash "$HERE/../ssm.sh" version --env staging
+
+VERSION_FIXTURE=$(mktemp)
+printf '#!/bin/bash\necho old\n' > "$VERSION_FIXTURE"
+assert_eq "unknown" "$(script_version "$VERSION_FIXTURE")" "a script from before versioning"
+assert_eq "unknown" "$(script_version "$VERSION_FIXTURE.missing")" "a missing file"
+rm -f "$VERSION_FIXTURE"
+
 echo ""
 if [[ $FAILED -eq 0 ]]; then
   echo "ok — $PASSED assertions passed"

@@ -48,6 +48,7 @@ ssm pod      # Shell into an EKS pod
 ssm db       # Open an RDS tunnel
 ssm config   # Manage account profiles and AWS credentials
 ssm update   # Update ssm to the latest version
+ssm version  # Print the installed version
 ssm help     # Show usage and config info
 ```
 
@@ -326,18 +327,72 @@ than failing with a raw AWS error.
 This repository is the source of truth for the `ssm` CLI. It previously lived in
 [`supplycart/devops`](https://github.com/supplycart/devops) under `commands/`.
 
-Pushes to `master` trigger `.github/workflows/deploy.yml`, which syncs `install.sh` and `ssm.sh`
-to the `supplycart-cdn` R2 bucket under `shells/` — the paths that
-`https://cdn.supplycart.my/shells/…` serves. Those URLs are hard-coded in `install.sh` and in
-`ssm update`, so changing them breaks every existing install.
+Run the same checks CI runs before opening a PR:
+
+```bash
+bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh
+bash test/args_test.sh && bash test/release_test.sh
+```
+
+### Releases
+
+`master` accepts changes only through pull requests, and only after the `test` check passes.
+Every merge is released by `.github/workflows/deploy.yml`:
+
+1. **Version.** The last `vX.Y.Z` tag gets a patch bump. Label the PR `release:minor` or
+   `release:major` before merging for a bigger one. The first release is `v1.0.0`.
+2. **Tag.** The workflow checks that the release-tag ruleset is active, stamps the version into
+   `ssm.sh` (`SSM_VERSION`), commits that on top of the merged commit and pushes it as the tag
+   `vX.Y.Z`. The tag is protected from the moment it exists. The release commit is reachable only
+   from the tag, so `master` always reads `SSM_VERSION="dev"`.
+3. **Upload.** `ssm.sh` and `install.sh` go to the `supplycart-cdn` R2 bucket, first under
+   `shells/vX.Y.Z/` and then under `shells/`, which is what `ssm update` and the install command
+   fetch. Those unversioned URLs are hard-coded in `install.sh` and in `ssm update`, so changing
+   them breaks every existing install.
+4. **Release.** A GitHub release `vX.Y.Z` with generated notes and both scripts attached.
+
+A failed run can be re-run: it finds the tag it already pushed for that commit and carries on
+from there. Running the workflow by hand from `master` releases the latest commit if it has not
+been tagged yet, with the `bump` input taking the place of the PR labels.
+
+Every version stays on the CDN, so an older one can be installed directly:
+
+```bash
+curl -fsSL https://cdn.supplycart.my/shells/v1.2.3/ssm.sh -o ~/.ssm/ssm.sh
+chmod +x ~/.ssm/ssm.sh
+ssm version   # ssm v1.2.3
+```
+
+`shells/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
 
 Publishing requires a `Production` environment on this repo with the variables
 `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secret
-`CLOUDFLARE_R2_CDN_SECRET`.
+`CLOUDFLARE_R2_CDN_SECRET`, plus access to the org secret `SUPPLYCART_BOT_TOKEN` (see
+[Repository rulesets](#repository-rulesets)).
 
 To verify a release reached the CDN:
 
 ```bash
-curl -fsSL https://cdn.supplycart.my/shells/ssm.sh | shasum
-shasum ssm.sh   # must match
+curl -fsSL https://cdn.supplycart.my/shells/ssm.sh | grep '^SSM_VERSION='
+gh release view --json tagName --jq .tagName   # must match
 ```
+
+### Repository rulesets
+
+Both rulesets are managed in the GitHub UI under **Settings → Rules → Rulesets**:
+
+| Ruleset | Protects |
+|---------|----------|
+| `master: pull requests only` | `master`: no direct pushes, force pushes or deletion. Changes arrive by PR (squash or rebase) with a passing `test` check. |
+| `release tags: v*.*.*` | `v*.*.*` tags: only the `bot` team can create them (in practice the deploy workflow), and nobody can move or delete them. |
+
+The `test` check is the job id in `.github/workflows/test.yml`, so renaming that job blocks
+every PR.
+
+GitHub doesn't accept GitHub Actions as a ruleset bypass actor, so the deploy workflow checks
+out and pushes release tags with the org secret `SUPPLYCART_BOT_TOKEN`. The only bypass on the
+tag ruleset is the org's `bot` team, which needs write access to this repo. Every member of
+that team can create release tags, so keep only automation accounts in it.
+
+To remove a tag that should not exist, an admin sets the release-tag ruleset to `disabled`,
+deletes the tag, and sets it back to `active`. The deploy refuses to release while it is off.

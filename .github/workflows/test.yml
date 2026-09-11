@@ -1,0 +1,25 @@
+name: Test
+
+on:
+    pull_request:
+        branches:
+            - master
+    workflow_call:
+
+permissions:
+    contents: read
+
+jobs:
+    # The job id is the status check the master ruleset requires.
+    # Renaming it blocks every PR.
+    test:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Syntax check
+              run: bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh
+
+            - name: Unit tests
+              run: bash test/args_test.sh && bash test/release_test.sh
