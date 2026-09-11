@@ -8,7 +8,8 @@ SSM_VERSION="dev"
 # error and usage messages.
 COMMAND=""
 
-if ! command -v jq &>/dev/null; then
+# Uninstall is exempt: jq may already be gone, and removing ssm must still work.
+if [[ "${1:-}" != "uninstall" ]] && ! command -v jq &>/dev/null; then
   echo "Error: jq is required but not installed. Run: brew install jq"
   exit 1
 fi
@@ -45,6 +46,35 @@ select_menu() {
   fi
 
   printf '%s\n' "${items[@]}" | fzf --prompt="$prompt " --height=~10 --layout=reverse --border
+}
+
+# select_multi <prompt> <header> row...
+#
+# Checklist counterpart of select_menu. Each row is "key<TAB>label"; prints the
+# key of every row picked, one per line, and returns 1 if the menu is cancelled.
+#
+# fzf prints the row under the cursor when Enter is pressed with nothing marked,
+# so a "none" row goes first: pressing Enter straight away picks nothing. With
+# no fzf at all -- uninstall can run after it is gone -- each row becomes a y/N
+# question instead.
+select_multi() {
+  local prompt="$1" header="$2"
+  shift 2
+  local row answer picked
+
+  if ! command -v fzf &>/dev/null; then
+    for row in "$@"; do
+      read -r -p "$prompt ${row#*$'\t'} [y/N]: " answer
+      [[ "$answer" == "y" || "$answer" == "Y" ]] && printf '%s\n' "${row%%$'\t'*}"
+    done
+    return 0
+  fi
+
+  picked=$({ printf 'none\tNothing -- keep all of these\n'; printf '%s\n' "$@"; } \
+    | fzf --multi --prompt="$prompt " --header="$header" --delimiter=$'\t' --with-nth=2.. \
+          --height=~15 --layout=reverse --border) || return 1
+  printf '%s\n' "$picked" | cut -f1 | grep -v '^none$'
+  return 0
 }
 
 # Draws the "connect to this, not to that" box for `ssm db`. The tunnel endpoint
@@ -128,7 +158,7 @@ print_tunnel_banner() {
 # them on entry so a second call in the same shell starts clean.
 ALL_ARG_FLAGS="env app type instance container task host db cluster namespace \
 pod profile region access-key secret-key skip-credentials yes delete-profile \
-name port force"
+name port force purge with-deps"
 
 # --access-key -> ARG_ACCESS_KEY
 arg_var() {
@@ -1455,6 +1485,178 @@ cmd_version() {
   echo "ssm $SSM_VERSION"
 }
 
+# ---------------------------------------------------------------------------
+# Uninstall. Paths are where install.sh puts things; they are globals so the
+# test suite can point them at a scratch directory.
+# ---------------------------------------------------------------------------
+SSM_DIR="$HOME/.ssm"
+SSM_SCRIPT="$SSM_DIR/ssm.sh"
+UNINSTALL_BIN_DIR="/usr/local/bin"
+SSM_SYMLINK="$UNINSTALL_BIN_DIR/ssm"
+AWS_CLI_DIR="/usr/local/aws-cli"
+SSM_PLUGIN_DIR="/usr/local/sessionmanagerplugin"
+UNINSTALL_BREW_PACKAGES="fzf jq kubernetes-cli"
+
+tilde_path() {
+  case "$1" in
+    "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;;
+    *)         printf '%s' "$1" ;;
+  esac
+}
+
+# True when <link> is a symlink to <target> or to something inside it.
+uninstall_link_into() {
+  [[ -L "$1" ]] || return 1
+  local dest
+  dest=$(readlink "$1")
+  [[ "$dest" == "$2" || "$dest" == "$2"/* ]]
+}
+
+# Removes paths as the user, falling back to sudo for what the pkg installers
+# and install.sh's symlink left root-owned.
+uninstall_rm() {
+  rm -rf -- "$@" 2>/dev/null && return 0
+  sudo rm -rf -- "$@"
+}
+
+# The checklist rows: "key<TAB>label" for each optional item actually present,
+# in the order install.sh adds them.
+uninstall_optional_rows() {
+  local pkg label
+  if [[ -n "$(find "$SSM_DIR" -mindepth 1 -maxdepth 1 ! -name ssm.sh 2>/dev/null | head -1)" ]]; then
+    printf 'config\t%-24s %s\n' "$(tilde_path "$SSM_DIR")" "config.json, db ports, kubeconfig"
+  fi
+  if command -v brew &>/dev/null; then
+    for pkg in $UNINSTALL_BREW_PACKAGES; do
+      brew list --formula "$pkg" &>/dev/null || continue
+      label="$pkg"
+      [[ "$pkg" == "kubernetes-cli" ]] && label="kubectl"
+      printf '%s\t%-24s brew uninstall %s\n' "$pkg" "$label" "$pkg"
+    done
+  fi
+  [[ -d "$AWS_CLI_DIR" ]] && printf 'aws-cli\t%-24s %s (sudo)\n' "AWS CLI v2" "$AWS_CLI_DIR"
+  [[ -d "$SSM_PLUGIN_DIR" ]] &&
+    printf 'session-manager-plugin\t%-24s %s (sudo)\n' "session-manager-plugin" "$SSM_PLUGIN_DIR"
+  return 0
+}
+
+# The checklist answer the flags stand for, when the checklist is not opened.
+uninstall_flagged_keys() {
+  local row key
+  for row in "$@"; do
+    key="${row%%$'\t'*}"
+    if [[ "$key" == "config" ]]; then
+      [[ -n "$ARG_PURGE" ]] && echo "$key"
+    else
+      [[ -n "$ARG_WITH_DEPS" ]] && echo "$key"
+    fi
+  done
+  return 0
+}
+
+# The part of an uninstall that always happens: the command and its script. A
+# symlink pointing anywhere else belongs to some other ssm and is left alone.
+#
+# Deleting the running script is safe, unlike overwriting it (see cmd_update):
+# rm only unlinks the name, and bash keeps reading the open file until it exits.
+uninstall_core() {
+  local status=0
+  if uninstall_link_into "$SSM_SYMLINK" "$SSM_SCRIPT"; then
+    if uninstall_rm "$SSM_SYMLINK"; then echo "Removed $SSM_SYMLINK"; else status=1; fi
+  elif [[ -e "$SSM_SYMLINK" || -L "$SSM_SYMLINK" ]]; then
+    echo "Left $SSM_SYMLINK alone: it does not point at $(tilde_path "$SSM_SCRIPT")." >&2
+  fi
+  if [[ -e "$SSM_SCRIPT" ]]; then
+    if rm -f "$SSM_SCRIPT"; then echo "Removed $(tilde_path "$SSM_SCRIPT")"; else status=1; fi
+  fi
+  # Only succeeds when nothing the user might want back is still in there.
+  rmdir "$SSM_DIR" 2>/dev/null
+  return $status
+}
+
+# Undoes an AWS pkg install the way AWS documents it: the install directory and
+# its links in /usr/local/bin. A link into some other install -- a brew awscli,
+# say -- is not ours and stays.
+uninstall_remove_pkg() {
+  local label="$1" dir="$2" name
+  shift 2
+  for name in "$@"; do
+    if uninstall_link_into "$UNINSTALL_BIN_DIR/$name" "$dir"; then
+      uninstall_rm "$UNINSTALL_BIN_DIR/$name" || return 1
+    fi
+  done
+  uninstall_rm "$dir" || return 1
+  echo "Removed $label ($dir)"
+}
+
+uninstall_remove() {
+  case "$1" in
+    config)
+      uninstall_rm "${SSM_DIR:?}" || return 1
+      echo "Removed $(tilde_path "$SSM_DIR")"
+      ;;
+    aws-cli)
+      uninstall_remove_pkg "AWS CLI v2" "$AWS_CLI_DIR" aws aws_completer
+      ;;
+    session-manager-plugin)
+      uninstall_remove_pkg "session-manager-plugin" "$SSM_PLUGIN_DIR" session-manager-plugin
+      ;;
+    *)
+      if [[ " $UNINSTALL_BREW_PACKAGES " != *" $1 "* ]]; then
+        echo "Unknown item '$1'." >&2
+        return 1
+      fi
+      brew uninstall "$1"
+      ;;
+  esac
+}
+
+cmd_uninstall() {
+  parse_args "" "--yes --purge --with-deps" "$@" || exit 1
+
+  local rows=() row
+  while IFS= read -r row; do
+    rows+=("$row")
+  done < <(uninstall_optional_rows)
+
+  echo "ssm uninstall removes:"
+  echo "  $SSM_SYMLINK"
+  echo "  $(tilde_path "$SSM_SCRIPT")"
+  echo "It never touches ~/.aws or Homebrew itself."
+  echo ""
+
+  if [[ -z "$ARG_YES" ]]; then
+    local confirm
+    read -r -p "Uninstall ssm? [y/N]: " confirm
+    [[ "$confirm" != "y" && "$confirm" != "Y" ]] && { echo "Aborted." >&2; return; }
+  fi
+
+  local selected=""
+  if [[ -n "$ARG_YES$ARG_PURGE$ARG_WITH_DEPS" ]]; then
+    selected=$(uninstall_flagged_keys "${rows[@]}")
+  elif [[ ${#rows[@]} -gt 0 ]]; then
+    selected=$(select_multi "Also remove?" \
+      "Tab marks, Enter confirms. Other tools on this Mac may rely on these." "${rows[@]}") \
+      || { echo "Aborted." >&2; return; }
+  fi
+
+  local failed=0 key
+  uninstall_core || failed=1
+  for key in $selected; do
+    uninstall_remove "$key" || failed=1
+  done
+
+  echo ""
+  if [[ $failed -ne 0 ]]; then
+    echo "Some items could not be removed -- see the errors above." >&2
+    exit 1
+  fi
+  echo "ssm uninstalled."
+  if [[ -d "$SSM_DIR" ]]; then
+    echo "Kept $(tilde_path "$SSM_DIR"); a reinstall picks it up. Delete it by hand once you are done with it."
+  fi
+}
+
 # Per-command usage. `ssm help` prints all of it; `ssm <cmd> --help` prints one
 # block. Kept in one function so the two can never drift apart.
 usage_for() {
@@ -1584,6 +1786,31 @@ A released copy prints its tag, e.g. v1.2.3. A copy run straight from a git
 checkout prints "dev".
 EOF
       ;;
+    uninstall)
+      cat <<'EOF'
+ssm uninstall — Remove ssm, and optionally its config and dependencies.
+
+  ssm uninstall [--yes] [--purge] [--with-deps]
+
+Always removes /usr/local/bin/ssm and ~/.ssm/ssm.sh, then opens a checklist of
+what else is present: ~/.ssm (config, db ports, kubeconfig) and the dependencies
+install.sh adds -- fzf, jq, kubectl, AWS CLI v2 and the Session Manager plugin.
+Nothing on the checklist is removed unless you mark it; other tools may rely on
+those dependencies. ~/.aws and Homebrew are never touched.
+
+  --yes         skip the confirmation; remove only what the other flags name
+  --purge       also delete ~/.ssm
+  --with-deps   also remove every installed dependency listed above
+
+Passing --purge or --with-deps answers the checklist instead of opening it.
+
+EXAMPLES
+  ssm uninstall                                 confirm, then pick from a checklist
+  ssm uninstall --yes                           the command only; keep config and deps
+  ssm uninstall --yes --purge                   the command and ~/.ssm
+  ssm uninstall --yes --purge --with-deps       everything install.sh added
+EOF
+      ;;
     *)
       cmd_help
       ;;
@@ -1596,29 +1823,32 @@ cmd_help() {
 USAGE
   ssm <command> [flags]      every flag you omit falls back to its menu
 
-  ssm ssh      Shell into an EC2 instance, an ECS container instance, or an
-               ECS/Fargate container. Detects ECS nodes and asks whether you
-               want the host shell or a container shell.
-  ssm pod      Shell into an EKS pod via kubectl (cluster -> namespace -> pod)
-  ssm db       Open an RDS tunnel via SSM port forwarding
-  ssm config   View, add, edit, or delete AWS account profiles
-  ssm update   Replace this script with the latest version from CDN
-  ssm version  Print the installed version
-  ssm help     Show this text
+  ssm ssh        Shell into an EC2 instance, an ECS container instance, or an
+                 ECS/Fargate container. Detects ECS nodes and asks whether you
+                 want the host shell or a container shell.
+  ssm pod        Shell into an EKS pod via kubectl (cluster -> namespace -> pod)
+  ssm db         Open an RDS tunnel via SSM port forwarding
+  ssm config     View, add, edit, or delete AWS account profiles
+  ssm update     Replace this script with the latest version from CDN
+  ssm uninstall  Remove ssm, and optionally its config and dependencies
+  ssm version    Print the installed version
+  ssm help       Show this text
 
   Run `ssm <command> --help` for that command's flags.
 
 FLAGS
-  ssm ssh      [--env <name>] [--app <name>] [--type ec2|ecs]
-               [--instance <id|Name>] [--container <name>] [--task <id>] [--host]
-  ssm pod      [--env <name>] [--cluster <name>] [-n <namespace>]
-               [--pod <name>] [-c <container>]
-  ssm db       [--env <name>] [--app <name>] [--db <identifier>]
-               [--instance <id|Name>]
-  ssm config   [view|add|edit|delete] [--env <name>] [--name <new>]
-               [--profile <p>] [--region <r>] [--db <id> --port <n>]
-               [--access-key <k>] [--secret-key -] [--skip-credentials]
-               [--force] [--yes] [--delete-profile]
+  ssm ssh        [--env <name>] [--app <name>] [--type ec2|ecs]
+                 [--instance <id|Name>] [--container <name>] [--task <id>]
+                 [--host]
+  ssm pod        [--env <name>] [--cluster <name>] [-n <namespace>]
+                 [--pod <name>] [-c <container>]
+  ssm db         [--env <name>] [--app <name>] [--db <identifier>]
+                 [--instance <id|Name>]
+  ssm config     [view|add|edit|delete] [--env <name>] [--name <new>]
+                 [--profile <p>] [--region <r>] [--db <id> --port <n>]
+                 [--access-key <k>] [--secret-key -] [--skip-credentials]
+                 [--force] [--yes] [--delete-profile]
+  ssm uninstall  [--yes] [--purge] [--with-deps]
 
 EXAMPLES
   ssm ssh                                     fully interactive, as before
@@ -1663,11 +1893,12 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     db)     cmd_db "$@" ;;
     config) cmd_config "$@" ;;
     update) cmd_update "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
     version|--version) cmd_version "$@" ;;
     help)   cmd_help ;;
     -h|--help) cmd_help ;;
     *)
-      echo "Usage: ssm [ssh|pod|db|config|update|version|help] [flags]" >&2
+      echo "Usage: ssm [ssh|pod|db|config|update|uninstall|version|help] [flags]" >&2
       echo "Run 'ssm help' for the full flag reference." >&2
       exit 1
       ;;
