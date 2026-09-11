@@ -366,8 +366,9 @@ ssm version   # ssm v1.2.3
 `shells/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
 
 Publishing requires a `Production` environment on this repo with the variables
-`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secrets
-`CLOUDFLARE_R2_CDN_SECRET` and `RELEASE_DEPLOY_KEY` (see [Repository rulesets](#repository-rulesets)).
+`CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secret
+`CLOUDFLARE_R2_CDN_SECRET`, plus access to the org secret `SUPPLYCART_BOT_TOKEN` (see
+[Repository rulesets](#repository-rulesets)).
 
 To verify a release reached the CDN:
 
@@ -378,30 +379,20 @@ gh release view --json tagName --jq .tagName   # must match
 
 ### Repository rulesets
 
-The rulesets live in `.github/rulesets/` and are applied by a repository admin. That JSON is the
-source of truth: edit it, then `PUT` it to `repos/supplycart/aws-ssm-manager/rulesets/<id>`.
+Both rulesets are managed in the GitHub UI under **Settings → Rules → Rulesets**:
 
-| File | Protects |
-|------|----------|
-| `master.json` | `master`: no direct pushes, force pushes or deletion. Changes arrive by PR (squash or rebase) with a passing `test` check. |
-| `release-tags.json` | `v*.*.*` tags: only a deploy key can create them (in practice the deploy workflow), and nobody can move or delete them. |
+| Ruleset | Protects |
+|---------|----------|
+| `master: pull requests only` | `master`: no direct pushes, force pushes or deletion. Changes arrive by PR (squash or rebase) with a passing `test` check. |
+| `release tags: v*.*.*` | `v*.*.*` tags: only the `bot` team can create them (in practice the deploy workflow), and nobody can move or delete them. |
 
-```bash
-gh api -X POST repos/supplycart/aws-ssm-manager/rulesets --input .github/rulesets/release-tags.json
-gh api -X POST repos/supplycart/aws-ssm-manager/rulesets --input .github/rulesets/master.json
-```
+The `test` check is the job id in `.github/workflows/test.yml`, so renaming that job blocks
+every PR.
 
-GitHub doesn't accept GitHub Actions as a ruleset bypass actor, so the deploy workflow pushes
-release tags over SSH with a write deploy key. Its private half is the `RELEASE_DEPLOY_KEY`
-secret. Deploy keys are the only bypass on `release-tags.json`, so keep this the repository's
-only write deploy key. Any other write key could create release tags too. To rotate it:
-
-```bash
-ssh-keygen -t ed25519 -N "" -C "aws-ssm-manager deploy.yml release tags" -f release_deploy_key
-gh repo deploy-key add release_deploy_key.pub --allow-write --title "deploy.yml release tags"
-gh secret set RELEASE_DEPLOY_KEY --env Production < release_deploy_key
-rm release_deploy_key release_deploy_key.pub   # then delete the old key in Settings → Deploy keys
-```
+GitHub doesn't accept GitHub Actions as a ruleset bypass actor, so the deploy workflow checks
+out and pushes release tags with the org secret `SUPPLYCART_BOT_TOKEN`. The only bypass on the
+tag ruleset is the org's `bot` team, which needs write access to this repo. Every member of
+that team can create release tags, so keep only automation accounts in it.
 
 To remove a tag that should not exist, an admin sets the release-tag ruleset to `disabled`,
 deletes the tag, and sets it back to `active`. The deploy refuses to release while it is off.

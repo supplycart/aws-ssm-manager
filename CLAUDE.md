@@ -68,15 +68,15 @@ The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/
 
 - `ssm.sh` must keep exactly one `SSM_VERSION="dev"` line; `stamp_version` fails the release
   otherwise. `script_version` reads the stamp back, which is how `ssm update` reports old -> new.
-- CI never pushes to `master`. `.github/rulesets/master.json` requires a PR plus the `test` check,
+- CI never pushes to `master`. The `master` ruleset requires a PR plus the `test` check,
   which is the job id in `test.yml`, so renaming that job blocks every PR.
-  `.github/rulesets/release-tags.json` blocks creating, moving or deleting `v*.*.*` tags for
-  everyone except deploy keys. GitHub rejects the Actions app as a bypass actor, so GITHUB_TOKEN
-  cannot create them: the workflow pushes the tag over SSH with the write deploy key in the
-  `RELEASE_DEPLOY_KEY` secret. Keep that the only write deploy key on the repo. A rerun therefore reuses the tag it finds on top of
-  the commit (`existing_release_for`) instead of creating another.
-- The ruleset JSON is the source of truth; apply edits with
-  `gh api -X PUT repos/supplycart/aws-ssm-manager/rulesets/<id> --input <file>`.
+- The tag ruleset blocks creating, moving or deleting `v*.*.*` tags for everyone outside the
+  org's `bot` team. A tag can't be moved, so a rerun reuses the tag it finds on top of the
+  commit (`existing_release_for`) instead of creating another.
+- GitHub rejects the Actions app as a bypass actor, so GITHUB_TOKEN cannot create release tags.
+  The release job checks out with the org secret `SUPPLYCART_BOT_TOKEN` and pushes the tag as
+  `supplycart-bot`.
+- Rulesets are managed in the GitHub UI (Settings → Rules → Rulesets), not in the repo.
 
 The CDN URLs are hard-coded in `install.sh` and in `cmd_update()` in `ssm.sh`. Do not change them
 without a migration plan — already-installed clients pull updates from those exact paths.

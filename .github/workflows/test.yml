@@ -10,8 +10,8 @@ permissions:
     contents: read
 
 jobs:
-    # The job id is the status check the master ruleset requires
-    # (.github/rulesets/master.json). Renaming it blocks every PR.
+    # The job id is the status check the master ruleset requires.
+    # Renaming it blocks every PR.
     test:
         runs-on: ubuntu-latest
         steps:

@@ -42,10 +42,14 @@ jobs:
             GH_TOKEN: ${{ github.token }}
             GH_REPO: ${{ github.repository }}
         steps:
+            # Checked out as the bot so the tag push below runs as an account
+            # the release-tag ruleset exempts. GitHub rejects the Actions app
+            # as a bypass actor, so GITHUB_TOKEN cannot create a protected tag.
             - name: Checkout
               uses: actions/checkout@v6
               with:
                   fetch-depth: 0
+                  token: ${{ secrets.SUPPLYCART_BOT_TOKEN }}
 
             - name: Resolve version
               id: version
@@ -72,8 +76,7 @@ jobs:
                   echo "version=$version" >> "$GITHUB_OUTPUT"
 
             # The tag must be protected from the moment it exists, so refuse to
-            # create one unless the ruleset in .github/rulesets/release-tags.json
-            # is active.
+            # create one unless an active tag ruleset covers v*.*.*.
             - name: Verify release tags are protected
               run: |
                   for id in $(gh api "repos/$GITHUB_REPOSITORY/rulesets?targets=tag" \
@@ -87,41 +90,29 @@ jobs:
                       exit 0
                     fi
                   done
-                  echo "::error::No active tag ruleset blocks creating, updating and deleting refs/tags/v*.*.*. Apply .github/rulesets/release-tags.json first."
+                  echo "::error::No active tag ruleset blocks creating, updating and deleting refs/tags/v*.*.*. Create one under Settings → Rules → Rulesets first."
                   exit 1
 
-            # GitHub rejects the Actions app as a ruleset bypass actor, so
-            # GITHUB_TOKEN cannot create a protected tag. The tag is pushed with
-            # the write deploy key that release-tags.json exempts instead.
             - name: Create release tag
               if: steps.version.outputs.reuse == 'false'
               env:
                   VERSION: ${{ steps.version.outputs.version }}
-                  RELEASE_DEPLOY_KEY: ${{ secrets.RELEASE_DEPLOY_KEY }}
+                  BOT_TOKEN: ${{ secrets.SUPPLYCART_BOT_TOKEN }}
               run: |
-                  if [[ -z "$RELEASE_DEPLOY_KEY" ]]; then
-                    echo "::error::The Production environment has no RELEASE_DEPLOY_KEY secret, which pushes release tags."
+                  if [[ -z "$BOT_TOKEN" ]]; then
+                    echo "::error::SUPPLYCART_BOT_TOKEN is not available to this repository, and it is what pushes release tags."
                     exit 1
                   fi
 
                   source .github/scripts/release.sh
                   stamp_version ssm.sh "$VERSION"
 
-                  git config user.name "github-actions[bot]"
-                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git config user.name "supplycart-bot"
+                  git config user.email "adam+bot@supplycart.my"
                   git commit -am "Release $VERSION" -m "Source: $GITHUB_SHA"
                   git tag -a "$VERSION" -m "$VERSION"
-
-                  key="$RUNNER_TEMP/release_deploy_key"
-                  known_hosts="$RUNNER_TEMP/github_known_hosts"
-                  trap 'rm -f "$key"' EXIT
-                  (umask 077 && printf '%s\n' "$RELEASE_DEPLOY_KEY" > "$key")
-                  # Trust GitHub's host keys from the authenticated API, not first contact.
-                  gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$known_hosts"
-
                   # Only the tag is pushed: the release commit never lands on master.
-                  GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$known_hosts -o StrictHostKeyChecking=yes" \
-                    git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$VERSION"
+                  git push origin "refs/tags/$VERSION"
 
             - name: Check out existing release tag
               if: steps.version.outputs.reuse == 'true'
