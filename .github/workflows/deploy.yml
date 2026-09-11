@@ -5,30 +5,133 @@ on:
         branches:
             - master
     workflow_dispatch:
+        inputs:
+            bump:
+                description: Version bump if this commit has not been released yet (auto reads the PR labels)
+                type: choice
+                options:
+                    - auto
+                    - patch
+                    - minor
+                    - major
+                default: auto
 
+# Serializes releases, so two merges can never be given the same version.
 concurrency:
     group: ${{ github.workflow }}
     cancel-in-progress: false
 
 jobs:
-    deploy:
-        name: Upload to R2
+    test:
+        uses: ./.github/workflows/test.yml
+
+    release:
+        name: Release
+        needs: test
+        if: github.ref == 'refs/heads/master'
         runs-on: ubuntu-latest
         environment: Production
+        permissions:
+            contents: write
         env:
             AWS_ACCESS_KEY_ID: ${{ vars.CLOUDFLARE_R2_CDN_ID }}
             AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_CDN_SECRET }}
             AWS_DEFAULT_REGION: auto
             CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
             CLOUDFLARE_R2_CDN_BUCKET: ${{ vars.CLOUDFLARE_R2_CDN_BUCKET }}
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
         steps:
             - name: Checkout
               uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
 
-            - name: Upload shell files to R2
+            - name: Resolve version
+              id: version
+              env:
+                  BUMP_INPUT: ${{ inputs.bump }}
               run: |
-                  aws s3 sync . s3://$CLOUDFLARE_R2_CDN_BUCKET/shells/ \
-                    --endpoint-url "https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com" \
-                    --exclude "*" \
-                    --include "install.sh" \
-                    --include "ssm.sh"
+                  source .github/scripts/release.sh
+
+                  version=$(existing_release_for "$GITHUB_SHA")
+                  if [[ -n "$version" ]]; then
+                    echo "$GITHUB_SHA was already tagged $version by an earlier run; resuming."
+                    echo "reuse=true" >> "$GITHUB_OUTPUT"
+                  else
+                    if [[ -n "$BUMP_INPUT" && "$BUMP_INPUT" != "auto" ]]; then
+                      part="$BUMP_INPUT"
+                    else
+                      part=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+                        --jq '.[0].labels[]?.name' | bump_from_labels)
+                    fi
+                    version=$(bump_version "$(latest_release_tag)" "$part")
+                    echo "Releasing $GITHUB_SHA as $version ($part bump)."
+                    echo "reuse=false" >> "$GITHUB_OUTPUT"
+                  fi
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+
+            # The tag must be protected from the moment it exists, so refuse to
+            # create one unless the ruleset in .github/rulesets/release-tags.json
+            # is active.
+            - name: Verify release tags are protected
+              run: |
+                  for id in $(gh api "repos/$GITHUB_REPOSITORY/rulesets?targets=tag" \
+                      --jq '.[] | select(.enforcement == "active") | .id'); do
+                    match=$(gh api "repos/$GITHUB_REPOSITORY/rulesets/$id" --jq '
+                      select((.conditions.ref_name.include | index("refs/tags/v*.*.*"))
+                        and ([.rules[].type] | index("deletion") and index("update")))
+                      | .name')
+                    if [[ -n "$match" ]]; then
+                      echo "Release tags are protected by ruleset '$match' ($id)."
+                      exit 0
+                    fi
+                  done
+                  echo "::error::No active tag ruleset blocks updating and deleting refs/tags/v*.*.*. Apply .github/rulesets/release-tags.json first."
+                  exit 1
+
+            - name: Create release tag
+              if: steps.version.outputs.reuse == 'false'
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  source .github/scripts/release.sh
+                  stamp_version ssm.sh "$VERSION"
+
+                  git config user.name "github-actions[bot]"
+                  git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+                  git commit -am "Release $VERSION" -m "Source: $GITHUB_SHA"
+                  git tag -a "$VERSION" -m "$VERSION"
+                  # Only the tag is pushed: the release commit never lands on master.
+                  git push origin "refs/tags/$VERSION"
+
+            - name: Check out existing release tag
+              if: steps.version.outputs.reuse == 'true'
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: git checkout --detach "refs/tags/$VERSION"
+
+            # The versioned copy goes up first, so shells/ never serves a
+            # version that has no copy of its own.
+            - name: Upload to R2
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  endpoint="https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com"
+                  for prefix in "shells/$VERSION" shells; do
+                    for file in ssm.sh install.sh; do
+                      aws s3 cp "$file" "s3://$CLOUDFLARE_R2_CDN_BUCKET/$prefix/$file" \
+                        --endpoint-url "$endpoint"
+                    done
+                  done
+
+            - name: Publish GitHub release
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  if gh release view "$VERSION" >/dev/null 2>&1; then
+                    echo "Release $VERSION already exists."
+                    exit 0
+                  fi
+                  gh release create "$VERSION" ssm.sh install.sh \
+                    --verify-tag --title "$VERSION" --generate-notes

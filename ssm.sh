@@ -1,6 +1,9 @@
 #!/bin/bash
 
 CONFIG_FILE="$HOME/.ssm/config.json"
+# The release workflow rewrites this line to the release tag (stamp_version in
+# .github/scripts/release.sh), so it must stay exactly SSM_VERSION="dev" here.
+SSM_VERSION="dev"
 # Set by the dispatch block at the bottom. Only used to name the command in
 # error and usage messages.
 COMMAND=""
@@ -1427,9 +1430,29 @@ cmd_update() {
     exit 1
   fi
 
+  local new_version
+  new_version=$(script_version "$tmp")
+
   chmod +x "$tmp"
   mv "$tmp" "$SSM_SCRIPT"
-  echo "ssm updated successfully."
+  if [[ "$new_version" == "$SSM_VERSION" ]]; then
+    echo "ssm is already at $SSM_VERSION."
+  else
+    echo "ssm updated: $SSM_VERSION -> $new_version"
+  fi
+}
+
+# Prints the version a script file was stamped with, or "unknown" for a copy
+# released before ssm had versions.
+script_version() {
+  local version
+  version=$(sed -n 's/^SSM_VERSION="\(.*\)"$/\1/p' "$1" 2>/dev/null | sed -n 1p)
+  echo "${version:-unknown}"
+}
+
+cmd_version() {
+  parse_args "" "" "$@" || exit 1
+  echo "ssm $SSM_VERSION"
 }
 
 # Per-command usage. `ssm help` prints all of it; `ssm <cmd> --help` prints one
@@ -1551,6 +1574,16 @@ Never pass a secret as a flag value -- it lands in your shell history. Set
 SSM_AWS_SECRET_KEY=... or use '--secret-key -' to read one line from stdin.
 EOF
       ;;
+    version)
+      cat <<'EOF'
+ssm version — Print the installed ssm version.
+
+  ssm version
+
+A released copy prints its tag, e.g. v1.2.3. A copy run straight from a git
+checkout prints "dev".
+EOF
+      ;;
     *)
       cmd_help
       ;;
@@ -1570,6 +1603,7 @@ USAGE
   ssm db       Open an RDS tunnel via SSM port forwarding
   ssm config   View, add, edit, or delete AWS account profiles
   ssm update   Replace this script with the latest version from CDN
+  ssm version  Print the installed version
   ssm help     Show this text
 
   Run `ssm <command> --help` for that command's flags.
@@ -1629,10 +1663,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     db)     cmd_db "$@" ;;
     config) cmd_config "$@" ;;
     update) cmd_update "$@" ;;
+    version|--version) cmd_version "$@" ;;
     help)   cmd_help ;;
     -h|--help) cmd_help ;;
     *)
-      echo "Usage: ssm [ssh|pod|db|config|update|help] [flags]" >&2
+      echo "Usage: ssm [ssh|pod|db|config|update|version|help] [flags]" >&2
       echo "Run 'ssm help' for the full flag reference." >&2
       exit 1
       ;;
