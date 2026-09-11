@@ -47,9 +47,10 @@ ssm ssh      # Shell into an EC2 instance or an ECS/Fargate container
 ssm pod      # Shell into an EKS pod
 ssm db       # Open an RDS tunnel
 ssm config   # Manage account profiles and AWS credentials
-ssm update   # Update ssm to the latest version
-ssm version  # Print the installed version
-ssm help     # Show usage and config info
+ssm update     # Update ssm to the latest version
+ssm uninstall  # Remove ssm, and optionally its config and dependencies
+ssm version    # Print the installed version
+ssm help       # Show usage and config info
 ```
 
 ### Skipping the menus
@@ -194,6 +195,32 @@ The four actions:
 - `aws-secret-key` — updates `~/.aws/credentials` (input is hidden)
 
 **delete** removes the account from `~/.ssm/config.json` and optionally strips the AWS CLI profile from `~/.aws/credentials` and `~/.aws/config`.
+
+### ssm uninstall
+
+```bash
+ssm uninstall [--yes] [--purge] [--with-deps]
+```
+
+After a confirmation, removes the `ssm` command: the `/usr/local/bin/ssm` symlink and
+`~/.ssm/ssm.sh`. A `/usr/local/bin/ssm` that points anywhere else is left alone.
+
+It then opens a checklist of what else is on the machine. Tab marks an item, Enter confirms:
+
+| Item | Removed with |
+|------|--------------|
+| `~/.ssm` — config, remembered DB ports, kubeconfig | `rm -rf ~/.ssm` |
+| `fzf`, `jq`, `kubectl` | `brew uninstall` |
+| AWS CLI v2 | `/usr/local/aws-cli` and its links in `/usr/local/bin` (sudo) |
+| Session Manager plugin | `/usr/local/sessionmanagerplugin` and its link (sudo) |
+
+Only items that are installed are listed, and nothing is removed unless you mark it — pressing
+Enter straight away keeps everything. ssm cannot tell whether `install.sh` added a dependency or
+found it already there, and other tools may rely on them. `~/.aws` and Homebrew itself are never
+touched.
+
+Non-interactively, `--yes` skips the confirmation and removes only the command. Add `--purge` for
+`~/.ssm` and `--with-deps` for the dependencies.
 
 ## AWS Requirements
 

@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 - `bash install.sh` — install dependencies and symlink `ssm` to `/usr/local/bin/ssm` on macOS
-- `ssm ssh / ssm pod / ssm db / ssm config / ssm update / ssm version / ssm help` — end-user CLI commands
+- `ssm ssh / ssm pod / ssm db / ssm config / ssm update / ssm uninstall / ssm version / ssm help` — end-user CLI commands
 - `bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh` — syntax check before committing
 - `bash test/args_test.sh && bash test/release_test.sh` — unit tests for the argument and release
   helpers; run with the syntax check. CI runs the same pair as the required `test` check
@@ -43,6 +43,13 @@ points that global at a fixture and exercises them directly: `config_account_exi
 `~/.aws`), `config_set_db_port` / `config_unset_db_port`, and `validate_port`. Ports are stored as
 JSON numbers via `--argjson` — `find_free_port` scans the config with `[.. | numbers]`, so a port
 written as a string would silently drop out of collision avoidance.
+
+`ssm uninstall` always removes the `/usr/local/bin/ssm` symlink (only when it points at
+`~/.ssm/ssm.sh`) and the script, then offers `~/.ssm` and each installed dependency on an
+`fzf --multi` checklist (`select_multi`, which falls back to y/N prompts once fzf is gone). Its
+paths (`SSM_DIR`, `SSM_SYMLINK`, `AWS_CLI_DIR`, `SSM_PLUGIN_DIR`, ...) are globals, so the tests
+point them at a scratch directory and stub `brew` and `sudo`. It is the one command that runs
+without jq — the startup check skips it — so keep jq calls out of it.
 
 Secrets never come from a flag value: `read_secret_value` takes `SSM_AWS_SECRET_KEY` or one line
 of stdin via `--secret-key -`.

@@ -284,6 +284,195 @@ assert_eq "unknown" "$(script_version "$VERSION_FIXTURE")" "a script from before
 assert_eq "unknown" "$(script_version "$VERSION_FIXTURE.missing")" "a missing file"
 rm -f "$VERSION_FIXTURE"
 
+echo "uninstall"
+
+parse_args "" "--yes --purge --with-deps" --purge --with-deps
+assert_eq "1" "$ARG_PURGE" "boolean flag --purge"
+assert_eq "1" "$ARG_WITH_DEPS" "boolean flag --with-deps"
+parse_args "" "--yes --purge --with-deps" --yes
+assert_eq "" "$ARG_PURGE" "--purge is cleared between calls"
+assert_eq "" "$ARG_WITH_DEPS" "--with-deps is cleared between calls"
+
+# Nothing here may touch the real machine: every path points into a scratch
+# directory, and brew and sudo are stubbed to record what they were asked to do.
+# The sudo stub always fails, so an unexpected escalation cannot succeed.
+UNINSTALL_ROOT=$(mktemp -d)
+CALLS="$UNINSTALL_ROOT/calls"
+BREW_INSTALLED=""
+brew() {
+  echo "brew $*" >> "$CALLS"
+  if [[ "$1" == "list" ]]; then
+    [[ " $BREW_INSTALLED " == *" ${!#} "* ]]
+  fi
+}
+sudo() { echo "sudo $*" >> "$CALLS"; return 1; }
+
+reset_uninstall_fixture() {
+  chmod -R u+w "$UNINSTALL_ROOT" 2>/dev/null
+  rm -rf "$UNINSTALL_ROOT/home" "$UNINSTALL_ROOT/bin" "$UNINSTALL_ROOT/aws-cli" \
+    "$UNINSTALL_ROOT/plugin"
+  : > "$CALLS"
+  SSM_DIR="$UNINSTALL_ROOT/home/.ssm"
+  SSM_SCRIPT="$SSM_DIR/ssm.sh"
+  UNINSTALL_BIN_DIR="$UNINSTALL_ROOT/bin"
+  SSM_SYMLINK="$UNINSTALL_BIN_DIR/ssm"
+  AWS_CLI_DIR="$UNINSTALL_ROOT/aws-cli"
+  SSM_PLUGIN_DIR="$UNINSTALL_ROOT/plugin"
+  BREW_INSTALLED=""
+  mkdir -p "$SSM_DIR" "$UNINSTALL_BIN_DIR"
+  echo '#!/bin/bash' > "$SSM_SCRIPT"
+  ln -s "$SSM_SCRIPT" "$SSM_SYMLINK"
+}
+
+assert_gone() {
+  if [[ ! -e "$1" && ! -L "$1" ]]; then pass; else fail "$2: '$1' still exists"; fi
+}
+assert_present() {
+  if [[ -e "$1" || -L "$1" ]]; then pass; else fail "$2: '$1' is missing"; fi
+}
+optional_keys() { uninstall_optional_rows | cut -f1 | tr '\n' ' '; }
+
+reset_uninstall_fixture
+assert_eq "" "$(optional_keys)" "a bare install offers nothing optional"
+
+reset_uninstall_fixture
+echo '{}' > "$SSM_DIR/config.json"
+BREW_INSTALLED="jq"
+mkdir -p "$AWS_CLI_DIR"
+assert_eq "config jq aws-cli " "$(optional_keys)" "only what is present is offered"
+
+reset_uninstall_fixture
+echo 'apiVersion: v1' > "$SSM_DIR/kubeconfig"
+BREW_INSTALLED="fzf jq kubernetes-cli"
+mkdir -p "$AWS_CLI_DIR" "$SSM_PLUGIN_DIR"
+assert_eq "config fzf jq kubernetes-cli aws-cli session-manager-plugin " "$(optional_keys)" \
+  "everything present is offered, in install order"
+
+ROWS=("config	~/.ssm" "fzf	fzf" "aws-cli	AWS CLI v2")
+flagged() { uninstall_flagged_keys "$@" | tr '\n' ' '; }
+parse_args "" "--yes --purge --with-deps" --yes
+assert_eq "" "$(flagged "${ROWS[@]}")" "--yes alone removes nothing optional"
+parse_args "" "--yes --purge --with-deps" --yes --with-deps
+assert_eq "fzf aws-cli " "$(flagged "${ROWS[@]}")" "--with-deps selects dependencies, not config"
+parse_args "" "--yes --purge --with-deps" --purge
+assert_eq "config " "$(flagged "${ROWS[@]}")" "--purge selects config, not dependencies"
+parse_args "" "--yes --purge --with-deps" --purge --with-deps
+assert_eq "config fzf aws-cli " "$(flagged "${ROWS[@]}")" "--purge --with-deps selects both"
+
+# fzf --multi prints the row under the cursor when Enter is pressed with nothing
+# marked, so a checklist whose first row is a real item would remove it. This
+# stub does exactly that.
+fzf() { head -1; }
+out=$(select_multi "Also remove?" "header" "config	~/.ssm" "jq	jq")
+assert_eq "" "$out" "Enter with nothing marked selects nothing"
+fzf() { grep -v '^none'; }
+out=$(select_multi "Also remove?" "header" "config	~/.ssm" "jq	jq")
+assert_eq "config
+jq" "$out" "marked rows come back as their keys"
+unset -f fzf
+
+out=$(printf 'n\ny\n' | PATH="$UNINSTALL_ROOT/empty" select_multi "Also remove?" "header" \
+  "config	~/.ssm" "jq	jq" 2>/dev/null)
+assert_eq "jq" "$out" "without fzf each row is asked as a y/N question"
+
+reset_uninstall_fixture
+uninstall_core >/dev/null 2>&1
+assert_gone "$SSM_SCRIPT" "core removes the script"
+assert_gone "$SSM_SYMLINK" "core removes our symlink"
+assert_gone "$SSM_DIR" "core removes ~/.ssm once nothing else is in it"
+
+reset_uninstall_fixture
+echo '{}' > "$SSM_DIR/config.json"
+uninstall_core >/dev/null 2>&1
+assert_present "$SSM_DIR/config.json" "core keeps the config"
+
+reset_uninstall_fixture
+rm "$SSM_SYMLINK"
+ln -s /usr/bin/true "$SSM_SYMLINK"
+out=$(uninstall_core 2>&1)
+assert_present "$SSM_SYMLINK" "a symlink to some other ssm is left alone"
+assert_contains "$SSM_SYMLINK" "$out" "the untouched symlink is reported"
+
+reset_uninstall_fixture
+chmod a-w "$UNINSTALL_BIN_DIR"
+uninstall_core >/dev/null 2>&1
+assert_contains "$SSM_SYMLINK" "$(grep '^sudo rm' "$CALLS")" \
+  "a symlink the user cannot remove is retried with sudo"
+chmod u+w "$UNINSTALL_BIN_DIR"
+
+reset_uninstall_fixture
+echo '{}' > "$SSM_DIR/config.json"
+uninstall_remove config >/dev/null 2>&1
+assert_gone "$SSM_DIR" "removing config deletes ~/.ssm"
+
+reset_uninstall_fixture
+uninstall_remove kubernetes-cli >/dev/null 2>&1
+assert_contains "brew uninstall kubernetes-cli" "$(cat "$CALLS")" "a brew dependency is brew-uninstalled"
+
+reset_uninstall_fixture
+mkdir -p "$AWS_CLI_DIR"
+touch "$AWS_CLI_DIR/aws" "$AWS_CLI_DIR/aws_completer"
+ln -s "$AWS_CLI_DIR/aws" "$UNINSTALL_BIN_DIR/aws"
+ln -s "$AWS_CLI_DIR/aws_completer" "$UNINSTALL_BIN_DIR/aws_completer"
+uninstall_remove aws-cli >/dev/null 2>&1
+assert_gone "$AWS_CLI_DIR" "removing the AWS CLI deletes its install directory"
+assert_gone "$UNINSTALL_BIN_DIR/aws" "removing the AWS CLI deletes the aws link"
+assert_gone "$UNINSTALL_BIN_DIR/aws_completer" "removing the AWS CLI deletes the aws_completer link"
+
+reset_uninstall_fixture
+mkdir -p "$AWS_CLI_DIR"
+ln -s /opt/homebrew/bin/aws "$UNINSTALL_BIN_DIR/aws"
+uninstall_remove aws-cli >/dev/null 2>&1
+assert_present "$UNINSTALL_BIN_DIR/aws" "an aws link into another install is left alone"
+
+reset_uninstall_fixture
+mkdir -p "$SSM_PLUGIN_DIR/bin"
+touch "$SSM_PLUGIN_DIR/bin/session-manager-plugin"
+ln -s "$SSM_PLUGIN_DIR/bin/session-manager-plugin" "$UNINSTALL_BIN_DIR/session-manager-plugin"
+uninstall_remove session-manager-plugin >/dev/null 2>&1
+assert_gone "$SSM_PLUGIN_DIR" "removing the plugin deletes its install directory"
+assert_gone "$UNINSTALL_BIN_DIR/session-manager-plugin" "removing the plugin deletes its link"
+
+reset_uninstall_fixture
+printf 'n\n' | cmd_uninstall >/dev/null 2>&1
+assert_present "$SSM_SCRIPT" "declining the confirmation removes nothing"
+
+reset_uninstall_fixture
+echo '{}' > "$SSM_DIR/config.json"
+BREW_INSTALLED="jq"
+mkdir -p "$AWS_CLI_DIR"
+(cmd_uninstall --yes </dev/null >/dev/null 2>&1)
+assert_gone "$SSM_SCRIPT" "--yes removes the script"
+assert_present "$SSM_DIR/config.json" "--yes keeps the config"
+assert_present "$AWS_CLI_DIR" "--yes keeps the AWS CLI"
+case "$(cat "$CALLS")" in
+  *"brew uninstall"*) fail "--yes must not uninstall brew packages" ;;
+  *) pass ;;
+esac
+
+reset_uninstall_fixture
+echo '{}' > "$SSM_DIR/config.json"
+BREW_INSTALLED="jq"
+mkdir -p "$AWS_CLI_DIR"
+(cmd_uninstall --yes --purge --with-deps </dev/null >/dev/null 2>&1)
+assert_gone "$SSM_DIR" "--purge removes ~/.ssm"
+assert_gone "$AWS_CLI_DIR" "--with-deps removes the AWS CLI"
+assert_contains "brew uninstall jq" "$(cat "$CALLS")" "--with-deps brew-uninstalls jq"
+
+# jq may already be gone by the time someone uninstalls, and uninstall does not
+# need it. tr (parse_args) and cat (the usage text) are the only external
+# commands --help runs.
+NOJQ_BIN="$UNINSTALL_ROOT/nojq"
+mkdir -p "$NOJQ_BIN"
+ln -s "$(command -v tr)" "$NOJQ_BIN/tr"
+ln -s "$(command -v cat)" "$NOJQ_BIN/cat"
+assert_status 0 "ssm uninstall starts without jq" \
+  env PATH="$NOJQ_BIN" /bin/bash "$HERE/../ssm.sh" uninstall --help
+
+unset -f brew sudo
+chmod -R u+w "$UNINSTALL_ROOT"
+rm -rf "$UNINSTALL_ROOT"
+
 echo ""
 if [[ $FAILED -eq 0 ]]; then
   echo "ok — $PASSED assertions passed"
