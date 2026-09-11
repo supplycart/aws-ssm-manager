@@ -32,6 +32,17 @@ stopping (`ssm ssh --env staging --app adam`). Two helpers carry this:
   listing the candidates. It returns rather than exits, because callers run it inside `$( )` where
   an `exit` would only kill the subshell — hence the `|| exit 1` at every call site.
 
+A flag added to a command must also be added to `ALL_ARG_FLAGS`. That list only drives the
+clear-on-entry loop, so a flag missing from it still parses but keeps its value into the next
+`parse_args` call — which the test suite checks for.
+
+`ssm config` writes through small helpers that take `CONFIG_FILE` as it stands, so the test suite
+points that global at a fixture and exercises them directly: `config_account_exists`,
+`config_rename_account` (moves the whole object, so ports and region follow; never touches
+`~/.aws`), `config_set_db_port` / `config_unset_db_port`, and `validate_port`. Ports are stored as
+JSON numbers via `--argjson` — `find_free_port` scans the config with `[.. | numbers]`, so a port
+written as a string would silently drop out of collision avoidance.
+
 Secrets never come from a flag value: `read_secret_value` takes `SSM_AWS_SECRET_KEY` or one line
 of stdin via `--secret-key -`.
 
