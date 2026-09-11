@@ -392,11 +392,11 @@ ssm version   # ssm v1.2.3
 
 `shells/aws-ssm-manager/vX.Y.Z/install.sh` is kept too, but it still downloads the latest `ssm.sh`.
 
-Up to v1.0.0 the scripts lived directly under `shells/`, and installs from then still run
+Up to v1.1.0 the scripts lived directly under `shells/`, and installs from then still run
 `ssm update` against `shells/ssm.sh`. So every release also writes the latest `ssm.sh` and
 `install.sh` to `shells/`. An old install's next `ssm update` picks up the new URL and never
-reads the old path again. v1.0.0 itself is copied into `shells/aws-ssm-manager/v1.0.0/`, and
-the original remains at `shells/v1.0.0/`.
+reads the old path again. The releases made before the move are copied from `shells/vX.Y.Z/`
+into `shells/aws-ssm-manager/vX.Y.Z/`, and the originals remain where they were.
 
 Publishing requires a `Production` environment on this repo with the variables
 `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_R2_CDN_BUCKET`, `CLOUDFLARE_R2_CDN_ID` and the secret

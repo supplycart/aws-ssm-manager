@@ -88,8 +88,8 @@ The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/
 The CDN URLs are hard-coded in `install.sh` and in `cmd_update()` in `ssm.sh`. Do not change them
 without a migration plan — already-installed clients pull updates from those exact paths.
 
-The scripts moved from `shells/` to `shells/aws-ssm-manager/` after v1.0.0, to leave room for
+The scripts moved from `shells/` to `shells/aws-ssm-manager/` after v1.1.0, to leave room for
 other shells. Installs from before the move still update from `shells/ssm.sh`, so the deploy
 keeps mirroring the latest `ssm.sh` and `install.sh` to `shells/`. Don't remove that mirror while
-such installs may still exist. The deploy also copies `shells/v1.0.0/` into the new layout once,
-skipping it when the copy already exists.
+such installs may still exist. The deploy also copies every old `shells/vX.Y.Z/` release into
+the new layout, skipping versions already copied.
