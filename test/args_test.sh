@@ -473,6 +473,41 @@ unset -f brew sudo
 chmod -R u+w "$UNINSTALL_ROOT"
 rm -rf "$UNINSTALL_ROOT"
 
+echo "cmd_menu"
+
+# The menu prints only the command name, so the dispatch block can use it
+# directly. Everything else on the row is a label for the human.
+fzf() { grep '^db'; }
+assert_eq "db" "$(cmd_menu)" "the menu prints the key of the picked row"
+fzf() { grep '^uninstall'; }
+assert_eq "uninstall" "$(cmd_menu)" "a key longer than its padding is not truncated"
+# fzf exits non-zero when the menu is cancelled with Esc.
+fzf() { return 130; }
+assert_status 1 "a cancelled menu returns 1" cmd_menu
+assert_eq "" "$(cmd_menu 2>/dev/null)" "a cancelled menu prints nothing"
+unset -f fzf
+
+# Every key the menu offers has to be a command the dispatch block accepts, or
+# picking it prints the usage error instead of running anything. Passing every
+# row through makes cmd_menu print them all, which is the list to check.
+fzf() { cat; }
+menu_keys=$(cmd_menu | awk '{print $1}')
+unset -f fzf
+DISPATCH=$(sed -n '/^  case "\$COMMAND" in$/,/^  esac$/p' "$HERE/../ssm.sh")
+for key in $menu_keys; do
+  assert_contains "$key)" "$DISPATCH" "the dispatch block handles '$key'"
+done
+
+# Bare `ssm` must keep its old contract everywhere a menu cannot be drawn: a
+# pipe, a redirect, or a machine without fzf. Anything scripted against it
+# depends on the exit status, not on the menu.
+assert_status 1 "bare ssm without a terminal still exits 1" \
+  env -u COLUMNS /bin/bash -c "echo | bash '$HERE/../ssm.sh'"
+assert_contains "Usage: ssm" "$LAST_OUTPUT" "bare ssm without a terminal still prints usage"
+assert_status 1 "an unknown command still exits 1" \
+  env /bin/bash -c "echo | bash '$HERE/../ssm.sh' nope"
+assert_contains "Usage: ssm" "$LAST_OUTPUT" "an unknown command still prints usage"
+
 echo ""
 if [[ $FAILED -eq 0 ]]; then
   echo "ok — $PASSED assertions passed"

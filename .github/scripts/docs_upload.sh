@@ -21,6 +21,9 @@ docs_content_type() {
     *.woff) echo "font/woff" ;;
     *.txt) echo "text/plain; charset=utf-8" ;;
     *.xml) echo "application/xml; charset=utf-8" ;;
+    # No .sh, .ps1 or .cmd here on purpose: those are release file names, and
+    # docs_upload_plan refuses a build that contains one. Adding a type would
+    # move the refusal to the wrong place, not make such a file servable.
     *) return 1 ;;
   esac
 }
@@ -31,8 +34,8 @@ docs_content_type() {
 # page goes live before the assets it loads.
 #
 # The site shares shells/aws-ssm-manager/ with the release scripts, so a build
-# holding a .sh file or a vX.Y.Z/ folder is refused outright, as is a file with
-# no known type. A refused build prints no plan at all.
+# holding a .sh, .ps1 or .cmd file or a vX.Y.Z/ folder is refused outright, as
+# is a file with no known type. A refused build prints no plan at all.
 docs_upload_plan() {
   local dist="$1" rel type failed=0 assets="" pages=""
 
@@ -43,7 +46,7 @@ docs_upload_plan() {
 
   while IFS= read -r rel; do
     case "$rel" in
-      *.sh | v[0-9]*/*)
+      *.sh | *.ps1 | *.cmd | v[0-9]*/*)
         echo "Error: $rel would overwrite a release file" >&2
         failed=1
         continue

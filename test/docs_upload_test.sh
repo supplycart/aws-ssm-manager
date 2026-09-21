@@ -44,6 +44,10 @@ assert_eq "font/woff2" "$(docs_content_type assets/inter-roman-latin.Di8.woff2)"
 assert_eq "image/png" "$(docs_content_type supplycart.png)" "an image"
 assert_eq "image/svg+xml" "$(docs_content_type logo.svg)" "an svg"
 assert_status 1 "a source map has no type" docs_content_type assets/app.B1x.js.map
+# Deliberately absent: docs_upload_plan refuses these outright, and giving one
+# a type here would make a Windows release file servable out of the docs build.
+assert_status 1 "a PowerShell script has no type" docs_content_type ssm.ps1
+assert_status 1 "a cmd shim has no type" docs_content_type ssm.cmd
 assert_status 1 "a file without an extension has no type" docs_content_type LICENSE
 
 echo "docs_upload_plan"
@@ -73,6 +77,23 @@ rm "$DIST/install.sh"
 touch "$DIST/ssm.sh"
 assert_status 1 "a build containing ssm.sh is refused" docs_upload_plan "$DIST"
 rm "$DIST/ssm.sh"
+
+# The Windows release files land in the same prefix, so the guard covers them
+# too -- and covers them by name, not by having no content type.
+for release_file in ssm.ps1 install.ps1 ssm.cmd; do
+  touch "$DIST/$release_file"
+  assert_status 1 "a build containing $release_file is refused" docs_upload_plan "$DIST"
+  assert_contains "$release_file would overwrite a release file" "$LAST_OUTPUT" \
+    "$release_file message"
+  rm "$DIST/$release_file"
+done
+
+# A case glob crosses /, so a release name nested in the build is caught too.
+mkdir -p "$DIST/guides"
+touch "$DIST/guides/ssm.ps1"
+assert_status 1 "a nested .ps1 is refused" docs_upload_plan "$DIST"
+assert_contains "guides/ssm.ps1 would overwrite" "$LAST_OUTPUT" "nested .ps1 message"
+rm -rf "$DIST/guides"
 
 mkdir "$DIST/v1.2.3"
 touch "$DIST/v1.2.3/index.html"

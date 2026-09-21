@@ -1817,6 +1817,35 @@ EOF
   esac
 }
 
+# `ssm` with no command asks what to do, rather than printing a usage block at
+# someone who just wants to connect to something. This is the entry point the
+# Windows Start Menu shortcut launches, and it is worth having on macOS too.
+#
+# It prints the chosen command for the dispatch block to run; printing nothing
+# means the menu was cancelled. Only the command name is echoed, so the caller
+# can use it directly -- everything else the menu draws is fzf's own, on the
+# terminal rather than on stdout.
+cmd_menu() {
+  # The labels are the ones from cmd_help, shortened to one line each.
+  local items=(
+    "ssh        Shell into an EC2 instance or an ECS container"
+    "pod        Shell into an EKS pod"
+    "db         Open an RDS tunnel"
+    "config     View, add, edit, or delete AWS account profiles"
+    "update     Replace this script with the latest version"
+    "uninstall  Remove ssm, and optionally its config and dependencies"
+    "version    Print the installed version"
+    "help       Show the full flag reference"
+  )
+
+  local choice
+  choice=$(select_menu "What do you want to do?" "${items[@]}") || return 1
+  [[ -z "$choice" ]] && return 1
+
+  # The key is the first word of the row.
+  printf '%s\n' "${choice%% *}"
+}
+
 cmd_help() {
   cat <<'EOF'
 
@@ -1886,6 +1915,14 @@ EOF
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   COMMAND="$1"
   [[ $# -gt 0 ]] && shift
+
+  # No command: ask, but only when there is someone there to ask and something
+  # to ask with. Piped, redirected, or without fzf, bare `ssm` keeps printing
+  # the usage line and exiting 1 the way it always has, so nothing scripted
+  # against it changes and nothing ever blocks on a menu nobody can see.
+  if [[ -z "$COMMAND" && -t 0 && -t 1 ]] && command -v fzf &>/dev/null; then
+    COMMAND=$(cmd_menu) || exit 0
+  fi
 
   case "$COMMAND" in
     ssh)    cmd_ssh "$@" ;;
