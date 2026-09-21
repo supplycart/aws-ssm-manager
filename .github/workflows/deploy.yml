@@ -106,6 +106,7 @@ jobs:
 
                   source .github/scripts/release.sh
                   stamp_version ssm.sh "$VERSION"
+                  stamp_version ssm.ps1 "$VERSION"
 
                   git config user.name "supplycart-bot"
                   git config user.email "adam+bot@supplycart.my"
@@ -148,10 +149,35 @@ jobs:
                     fi
                   done
 
-                  for dest in "$prefix/$VERSION" "$prefix" shells; do
-                    for file in ssm.sh install.sh; do
-                      aws s3 cp "$file" "$bucket/$dest/$file" --endpoint-url "$endpoint"
+                  # Defined after the backfill loop above on purpose: that loop
+                  # copies pre-v1.1.0 releases, which only ever held the two
+                  # bash files, and must keep its own two-file list.
+                  release_files="ssm.sh install.sh ssm.ps1 install.ps1"
+
+                  for dest in "$prefix/$VERSION" "$prefix"; do
+                    for file in $release_files; do
+                      # Without an explicit type R2 stores .ps1 as
+                      # octet-stream, and Invoke-RestMethod hands `iex` a
+                      # byte[] for that, which it cannot execute. ssm.cmd is
+                      # not here at all: install.ps1 writes it locally, because
+                      # cmd.exe is unforgiving about line endings and a BOM.
+                      case "$file" in
+                        *.ps1)
+                          aws s3 cp "$file" "$bucket/$dest/$file" \
+                            --endpoint-url "$endpoint" \
+                            --content-type "text/plain; charset=utf-8" ;;
+                        *)
+                          aws s3 cp "$file" "$bucket/$dest/$file" \
+                            --endpoint-url "$endpoint" ;;
+                      esac
                     done
+                  done
+
+                  # The legacy shells/ mirror is frozen at the two macOS files.
+                  # It exists only for installs from before v1.1.0, and there
+                  # has never been a Windows release that could read from it.
+                  for file in ssm.sh install.sh; do
+                    aws s3 cp "$file" "$bucket/shells/$file" --endpoint-url "$endpoint"
                   done
 
             - name: Publish GitHub release
@@ -162,5 +188,5 @@ jobs:
                     echo "Release $VERSION already exists."
                     exit 0
                   fi
-                  gh release create "$VERSION" ssm.sh install.sh \
+                  gh release create "$VERSION" ssm.sh install.sh ssm.ps1 install.ps1 \
                     --verify-tag --title "$VERSION" --generate-notes

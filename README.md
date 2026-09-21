@@ -2,7 +2,7 @@
 
 A CLI tool for connecting to AWS EC2 instances, ECS containers, EKS pods, and RDS databases —
 without needing a bastion host or open SSH ports. Interactive by default, fully scriptable with
-flags. macOS only.
+flags. Runs on macOS and Windows 11.
 
 **Docs: [cdn.supplycart.my/shells/aws-ssm-manager](https://cdn.supplycart.my/shells/aws-ssm-manager/index.html)**
 — the install guide with a version picker, every command and its flags, and the AWS setup ssm
@@ -10,18 +10,34 @@ needs.
 
 ## Install
 
+macOS:
+
 ```bash
 bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh)          # latest
 bash <(curl -fsSL https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh) v1.1.0   # a specific release
 ```
 
-This installs `awscli`, `fzf`, `jq`, `kubectl` and the AWS Session Manager plugin, and links
-`/usr/local/bin/ssm` to `~/.ssm/ssm.sh`. A pinned install stays on its release until `ssm update`,
-which moves it to the latest.
+Installs `awscli`, `fzf`, `jq`, `kubectl` and the AWS Session Manager plugin via Homebrew, and
+links `/usr/local/bin/ssm` to `~/.ssm/ssm.sh`.
+
+Windows 11:
+
+```powershell
+irm https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1 | iex
+
+$env:SSM_INSTALL_VERSION = 'v1.1.0'; irm https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1 | iex
+```
+
+Installs PowerShell 7, `awscli`, `kubectl`, the Session Manager plugin and (optionally) `fzf` via
+winget, writes `%USERPROFILE%\.ssm\ssm.ps1` and an `ssm.cmd` shim, puts that directory on your
+user PATH, and creates Start Menu and Desktop shortcuts. No `jq`: PowerShell parses JSON itself.
+
+A pinned install stays on its release until `ssm update`, which moves it to the latest.
 
 Then add an AWS account with `ssm config`:
 
 ```bash
+ssm            # Ask what to do, and run it
 ssm ssh        # Shell into an EC2 instance or an ECS/Fargate container
 ssm pod        # Shell into an EKS pod
 ssm db         # Open an RDS tunnel
@@ -41,8 +57,23 @@ Run the same checks CI runs before opening a PR:
 
 ```bash
 bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh && bash -n .github/scripts/docs_upload.sh
-bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh
+bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh && bash test/parity_test.sh
+
+pwsh -Command '"ssm.ps1", "install.ps1" | ForEach-Object { $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $_), [ref]$null, [ref]$e); if ($e) { $e; exit 1 } }'
+pwsh -File test/ssm_test.ps1 && pwsh -File test/install_ps_test.ps1
 ```
+
+### Two implementations
+
+`ssm.sh` (bash 3.2, macOS) and `ssm.ps1` (PowerShell 7, Windows 11) are two implementations of one
+CLI. **Every command and every flag must exist in both.** `commands.manifest` is the source of
+truth and `test/parity_test.sh` fails the required `test` check if either side disagrees with it.
+
+Adding a flag is a change in four places: `commands.manifest`, `ssm.sh`'s `parse_args` call,
+`ssm.ps1`'s `$SSM_COMMANDS` table, and the matching page under `docs/src/commands/`.
+
+The differences that are deliberate are listed in `docs/src/reference/platforms.md`, and nowhere
+else.
 
 ### Docs site
 

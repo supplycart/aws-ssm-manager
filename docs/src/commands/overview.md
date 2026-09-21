@@ -6,6 +6,7 @@ description: The ssm commands, and the flags that answer each menu.
 # Commands
 
 ```sh
+ssm            # Ask what to do, and run it
 ssm ssh        # Shell into an EC2 instance or an ECS/Fargate container
 ssm pod        # Shell into an EKS pod
 ssm db         # Open an RDS tunnel
@@ -15,6 +16,18 @@ ssm uninstall  # Remove ssm, and optionally its config and dependencies
 ssm version    # Print the installed version
 ssm help       # Show usage and config info
 ```
+
+The command set and the flags are identical on macOS and Windows; see
+[platform differences](/reference/platforms) for the short list of what is not.
+
+## Starting from a menu
+
+`ssm` on its own asks what you want to do and then runs it, so there is nothing
+to memorise. It is what the Windows Start Menu shortcut launches.
+
+The menu only opens when there is a terminal to draw it on. Piped, redirected,
+or in a CI job, bare `ssm` prints usage and exits 1 as it always has — so
+nothing scripted against it changes.
 
 ## Skipping the menus
 

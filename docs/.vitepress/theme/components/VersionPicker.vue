@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
-const INSTALL_URL =
-  'https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh'
+const INSTALL_URL = {
+  macos: 'https://cdn.supplycart.my/shells/aws-ssm-manager/install.sh',
+  windows: 'https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1',
+}
 // Read in the browser on every visit, so a new release shows up without a
 // docs deploy.
 const RELEASES_API =
@@ -25,15 +27,29 @@ interface ApiRelease {
   prerelease: boolean
 }
 
+type Os = 'macos' | 'windows'
+const os = ref<Os>('macos')
+
 const releases = ref<Release[]>([])
 const state = ref<'loading' | 'ready' | 'failed'>('loading')
 const selected = ref('')
 
-const command = computed(
-  () =>
-    `bash <(curl -fsSL ${INSTALL_URL})` +
+// Windows cannot take an argument through `irm | iex`, so a pinned install
+// goes through the environment variable install.ps1 reads.
+const command = computed(() => {
+  if (os.value === 'windows') {
+    const run = `irm ${INSTALL_URL.windows} | iex`
+    return selected.value
+      ? `$env:SSM_INSTALL_VERSION = '${selected.value}'; ${run}`
+      : run
+  }
+  return (
+    `bash <(curl -fsSL ${INSTALL_URL.macos})` +
     (selected.value ? ` ${selected.value}` : '')
-)
+  )
+})
+
+const lang = computed(() => (os.value === 'windows' ? 'powershell' : 'sh'))
 
 const release = computed(() =>
   selected.value
@@ -59,6 +75,15 @@ function label(r: Release): string {
 }
 
 onMounted(async () => {
+  // In onMounted, not at setup: this component is server-rendered at build
+  // time and there is no navigator there.
+  const platform =
+    (navigator as unknown as { userAgentData?: { platform?: string } })
+      .userAgentData?.platform ??
+    navigator.platform ??
+    ''
+  if (/win/i.test(platform)) os.value = 'windows'
+
   try {
     const res = await fetch(RELEASES_API, {
       headers: { Accept: 'application/vnd.github+json' },
@@ -81,6 +106,25 @@ onMounted(async () => {
 <template>
   <div class="version-picker">
     <div class="controls">
+      <div class="os" role="group" aria-label="Platform">
+        <button
+          type="button"
+          :aria-pressed="os === 'macos'"
+          :class="{ active: os === 'macos' }"
+          @click="os = 'macos'"
+        >
+          macOS
+        </button>
+        <button
+          type="button"
+          :aria-pressed="os === 'windows'"
+          :class="{ active: os === 'windows' }"
+          @click="os = 'windows'"
+        >
+          Windows
+        </button>
+      </div>
+
       <label for="ssm-version">Version</label>
       <select id="ssm-version" v-model="selected" :disabled="state !== 'ready'">
         <option value="">
@@ -102,9 +146,9 @@ onMounted(async () => {
 
     <!-- Same markup as a VitePress code block, so it gets the theme's styling
          and copy button. -->
-    <div class="language-sh vp-adaptive-theme">
+    <div :class="['vp-adaptive-theme', `language-${lang}`]">
       <button title="Copy Code" class="copy"></button>
-      <span class="lang">sh</span>
+      <span class="lang">{{ lang }}</span>
       <pre class="vp-code"><code>{{ command }}</code></pre>
     </div>
 
@@ -117,8 +161,15 @@ onMounted(async () => {
       Couldn't load the version list, so only the latest is shown. Older
       versions are on the
       <a :href="RELEASES_PAGE" target="_blank" rel="noreferrer">releases page</a
-      >: add the tag after the command, for example
-      <code>… install.sh) v1.0.0</code>.
+      >:
+      <template v-if="os === 'windows'">
+        set <code>$env:SSM_INSTALL_VERSION</code> before the command, for
+        example <code>$env:SSM_INSTALL_VERSION = 'v1.0.0'</code>.
+      </template>
+      <template v-else>
+        add the tag after the command, for example
+        <code>… install.sh) v1.0.0</code>.
+      </template>
     </p>
   </div>
 </template>
@@ -137,6 +188,28 @@ onMounted(async () => {
 
 .controls label {
   font-weight: 600;
+}
+
+.controls .os {
+  display: inline-flex;
+  border: 1px solid var(--vp-c-divider);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.controls .os button {
+  padding: 4px 12px;
+  font-size: 14px;
+  color: var(--vp-c-text-2);
+  background-color: var(--vp-c-bg-soft);
+  transition:
+    color 0.2s,
+    background-color 0.2s;
+}
+
+.controls .os button.active {
+  color: var(--vp-c-white);
+  background-color: var(--vp-c-brand-1);
 }
 
 .controls select {
