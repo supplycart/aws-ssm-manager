@@ -1,0 +1,23 @@
+# The command surface of ssm, and the single source of truth for it.
+#
+# ssm.sh and ssm.ps1 are two implementations of one CLI. This file is what they
+# are both checked against: test/parity_test.sh reads the flag sets out of each
+# shipped script and fails if either one disagrees with a line below. Neither
+# implementation can satisfy it alone, which is the point -- a flag added to one
+# and forgotten in the other is a red check, not a bug report.
+#
+# Adding or removing a flag is a change in four places: this file, ssm.sh's
+# parse_args call for that command, ssm.ps1's $SSM_COMMANDS table, and the
+# matching page under docs/src/commands/.
+#
+# Format, tab-separated:  <command>	<value-flags>	<bool-flags>
+# A command that takes no flags has two empty columns.
+
+ssh	--env --app --type --instance --container --task	--host
+pod	--env --cluster --namespace --pod --container
+db	--env --app --db --instance
+config	--env --name --profile --region --access-key --secret-key --db --port	--skip-credentials --force --yes --delete-profile
+update
+uninstall		--yes --purge --with-deps
+version
+help

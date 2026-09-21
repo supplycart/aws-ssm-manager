@@ -1,0 +1,9 @@
+# ssm.ps1 is downloaded straight from the CDN and parsed by PowerShell, which
+# handles either line ending -- but the release uploads the file as bytes, so
+# pin it rather than leave it to whatever the committer's platform does.
+*.ps1 text eol=lf
+*.sh  text eol=lf
+
+# ssm.cmd is never stored here: install.ps1 writes it, because cmd.exe reads
+# batch files lazily and is unforgiving about both line endings and a BOM.
+# Generating it locally keeps those bytes out of git and out of the CDN.
