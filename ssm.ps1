@@ -79,6 +79,15 @@ function Write-SsmErr {
     [Console]::Error.WriteLine($Message)
 }
 
+# stdout, straight to the console rather than into the pipeline. Anything a
+# function writes to its output stream is the function's return value, so a
+# caller that discards the return -- or, as with --help below, a throw that
+# unwinds past it -- would swallow it.
+function Write-SsmOut {
+    param([string]$Message = '')
+    [Console]::Out.WriteLine($Message)
+}
+
 # `exit N` inside a function. A bare `exit` would kill the test host, because
 # the suite dot-sources this file rather than running it; bash gets away with
 # `exit` because args_test.sh runs each case in a subshell.
@@ -256,7 +265,10 @@ function Read-SsmArgs {
         $key = ConvertTo-SsmCanonicalFlag $key
 
         if ($key -ceq '--help') {
-            Get-SsmUsage $script:COMMAND
+            # Written straight to stdout: Exit-Ssm throws, and the exception
+            # unwinds past the caller collecting this function's output, so
+            # anything returned through the pipeline here is lost.
+            Get-SsmUsage $script:COMMAND | ForEach-Object { Write-SsmOut $_ }
             Exit-Ssm 0
         }
 
@@ -2341,9 +2353,29 @@ function Invoke-SsmUninstall {
 }
 
 # ---------------------------------------------------------------------------
-# Usage. Generated to match ssm.sh's usage_for and cmd_help exactly, apart from
-# the platform tokens listed in docs/src/reference/platforms.md -- the parity
-# test normalises those and then compares the two byte for byte.
+# Usage. Generated from ssm.sh's usage_for and cmd_help, so the two are
+# byte-identical apart from the platform tokens listed below.
+#
+# test/parity_test.sh reads these PLATFORM-TOKEN lines, inverts them, and diffs
+# the real `--help` output of both implementations. Adding a difference means
+# adding a line here; there is nowhere else to declare one.
+#
+# PLATFORM-TOKEN	~/.ssm/config.json	%USERPROFILE%\.ssm\config.json
+# PLATFORM-TOKEN	~/.ssm/kubeconfig	%USERPROFILE%\.ssm\kubeconfig
+# PLATFORM-TOKEN	~/.ssm/ssm.sh	%USERPROFILE%\.ssm\ssm.ps1
+# PLATFORM-TOKEN	/usr/local/bin/ssm	%USERPROFILE%\.ssm\ssm.cmd
+# PLATFORM-TOKEN	~/.ssm	%USERPROFILE%\.ssm
+# PLATFORM-TOKEN	~/.aws	%USERPROFILE%\.aws
+# PLATFORM-TOKEN	brew install kubernetes-cli	winget install Kubernetes.kubectl
+# PLATFORM-TOKEN	brew install jq	winget install jqlang.jq
+# PLATFORM-TOKEN	brew install fzf	winget install junegunn.fzf
+# PLATFORM-TOKEN	fzf, jq, kubectl	fzf, kubectl
+# PLATFORM-TOKEN	install.sh adds	install.ps1 adds
+# PLATFORM-TOKEN	bash install.sh	install.ps1
+# PLATFORM-TOKEN	Homebrew packages	winget packages
+# PLATFORM-TOKEN	Homebrew itself	winget itself
+# PLATFORM-TOKEN	Homebrew	winget
+# PLATFORM-TOKEN	this Mac	this PC
 # ---------------------------------------------------------------------------
 
 # bash: usage_for (ssm.sh:1662)
@@ -2444,7 +2476,7 @@ ssm config — Manage account profiles and AWS CLI credentials.
   --db, --port      set the local tunnel port for one database (both required)
   --force           let `add` replace an account that already exists
   --yes             skip the delete confirmation
-  --delete-profile  also remove the profile from ~/.aws/credentials and config
+  --delete-profile  also remove the profile from %USERPROFILE%\.aws/credentials and config
 
 EXAMPLES
   ssm config                                    pick an action from a menu
@@ -2481,11 +2513,11 @@ ssm uninstall — Remove ssm, and optionally its config and dependencies.
 
   ssm uninstall [--yes] [--purge] [--with-deps]
 
-Always removes %USERPROFILE%\.ssm\ssm.cmd and %USERPROFILE%\.ssm/ssm.sh, then opens a checklist of
+Always removes %USERPROFILE%\.ssm\ssm.cmd and %USERPROFILE%\.ssm\ssm.ps1, then opens a checklist of
 what else is present: %USERPROFILE%\.ssm (config, db ports, kubeconfig) and the dependencies
-install.sh adds -- fzf, jq, kubectl, AWS CLI v2 and the Session Manager plugin.
+install.ps1 adds -- fzf, kubectl, AWS CLI v2 and the Session Manager plugin.
 Nothing on the checklist is removed unless you mark it; other tools may rely on
-those dependencies. ~/.aws and winget are never touched.
+those dependencies. %USERPROFILE%\.aws and winget are never touched.
 
   --yes         skip the confirmation; remove only what the other flags name
   --purge       also delete %USERPROFILE%\.ssm

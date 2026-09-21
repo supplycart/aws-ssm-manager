@@ -132,6 +132,77 @@ count_cdn() { grep -cF "$CDN" "$1" 2>/dev/null || echo 0; }
 assert_eq "1" "$(count_cdn "$PS")" "ssm.ps1 names the CDN once"
 assert_eq "1" "$(count_cdn "$ROOT/ssm.sh")" "ssm.sh names the CDN once"
 
+echo "help text is identical"
+
+# The strongest parity check there is: run both and diff. Only the platform
+# tokens below are allowed to differ, and they are the same list the usage
+# text in ssm.ps1 was generated with. Needs pwsh, which CI has; skipped
+# elsewhere so the suite still runs on a machine without it.
+if command -v pwsh >/dev/null 2>&1; then
+  # The normalisation is not spelled out here: it is read from the
+  # PLATFORM-TOKEN lines ssm.ps1 declares and applied in reverse. A difference
+  # that is not declared there fails this check, and a declared one cannot rot.
+  #
+  # Literal replacement, not sed: the tokens contain backslashes, dots and
+  # slashes, and escaping them into a regex is how this goes quietly wrong.
+  normalise_ps() {
+    awk -v psfile="$PS" '
+      BEGIN {
+        n = 0
+        while ((getline line < psfile) > 0) {
+          if (line ~ /^# PLATFORM-TOKEN\t/) {
+            split(line, f, "\t"); n++; mac[n] = f[2]; win[n] = f[3]
+          }
+        }
+        close(psfile)
+        if (n == 0) { print "no PLATFORM-TOKEN lines in " psfile > "/dev/stderr"; exit 1 }
+      }
+      {
+        line = $0
+        for (i = 1; i <= n; i++) {
+          out = ""; rest = line
+          while ((p = index(rest, win[i])) > 0) {
+            out = out substr(rest, 1, p - 1) mac[i]
+            rest = substr(rest, p + length(win[i]))
+          }
+          line = out rest
+        }
+        print line
+      }'
+  }
+
+  if [[ "$(grep -c '^# PLATFORM-TOKEN' "$PS")" -eq 0 ]]; then
+    fail "ssm.ps1 declares no PLATFORM-TOKEN lines"
+  fi
+
+  HELP_TMP=$(mktemp -d)
+  for cmd in $COMMANDS ""; do
+    label="${cmd:-help}"
+    if [[ -z "$cmd" ]]; then
+      bash "$SH" help > "$HELP_TMP/a" 2>&1
+      pwsh -NoProfile -File "$PS" help > "$HELP_TMP/b" 2>&1
+    else
+      bash "$SH" "$cmd" --help > "$HELP_TMP/a" 2>&1
+      pwsh -NoProfile -File "$PS" "$cmd" --help > "$HELP_TMP/b" 2>&1
+    fi
+    normalise_ps < "$HELP_TMP/b" > "$HELP_TMP/b.norm"
+
+    # An empty side is the failure worth naming: --help output written into a
+    # function's pipeline is swallowed when the exit throw unwinds past it.
+    if [[ ! -s "$HELP_TMP/b.norm" ]]; then
+      fail "ssm.ps1 $label --help printed nothing"
+    elif diff -q "$HELP_TMP/a" "$HELP_TMP/b.norm" >/dev/null; then
+      pass
+    else
+      fail "$label help differs between the implementations:
+$(diff "$HELP_TMP/a" "$HELP_TMP/b.norm" | head -8)"
+    fi
+  done
+  rm -rf "$HELP_TMP"
+else
+  echo "  (skipped: no pwsh on this machine)"
+fi
+
 echo "the docs match the manifest"
 
 for cmd in $COMMANDS; do
