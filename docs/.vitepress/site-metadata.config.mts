@@ -8,6 +8,13 @@ export default defineConfig({
   lang: 'en-US',
   head: [
     // head links are not prefixed with `base`, unlike page links.
-    ['link', { rel: 'icon', href: '/shells/aws-ssm-manager/supplycart.png' }],
+    [
+      'link',
+      {
+        rel: 'icon',
+        type: 'image/svg+xml',
+        href: '/shells/aws-ssm-manager/aws-ssm.svg',
+      },
+    ],
   ],
 })

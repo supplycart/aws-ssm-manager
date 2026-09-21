@@ -5,7 +5,7 @@ import nav from '../src/nav.mts'
 
 // refer: https://vitepress.dev/reference/default-theme-config
 export default {
-  logo: '/supplycart.png',
+  logo: '/aws-ssm.svg',
   siteTitle: 'ssm',
   socialLinks,
   nav,
