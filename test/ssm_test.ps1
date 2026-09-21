@@ -360,6 +360,32 @@ Assert-False ($bytes[0] -eq 0xEF) 'the shim has no BOM'
 Assert-False (Test-SsmOwnLauncher $ours) 'a shim we did not write is left alone'
 Remove-Item $launcherDir -Recurse -Force -ErrorAction SilentlyContinue
 
+# Builds the real rows against a scratch directory. -f binds looser than the
+# comma in a method call, so an unparenthesised `.Add("..." -f $a, $b)` passes
+# two arguments and throws at runtime -- which nothing else here would catch.
+$rowsDir = Join-Path ([IO.Path]::GetTempPath()) "ssm-rows-$PID"
+New-Item -ItemType Directory -Path $rowsDir -Force | Out-Null
+Set-Content (Join-Path $rowsDir 'config.json') '{}'
+$SSM_DIR = $rowsDir
+$AWS_CLI_DIR = Join-Path $rowsDir 'awscli'
+$SSM_PLUGIN_DIR = Join-Path $rowsDir 'plugin'
+New-Item -ItemType Directory -Path $AWS_CLI_DIR -Force | Out-Null
+New-Item -ItemType Directory -Path $SSM_PLUGIN_DIR -Force | Out-Null
+
+$built = Get-SsmUninstallRows
+Assert-Eq 3 $built.Count 'only the items that are present are offered'
+Assert-Eq 'config' (($built[0] -split "`t")[0]) 'the config row comes first, as install order'
+Assert-Contains 'config.json, db ports, kubeconfig' ($built -join "`n") 'the config row is formatted'
+Assert-Contains 'AWS CLI v2' ($built -join "`n") 'the AWS CLI row is formatted'
+Assert-Contains '(admin)' ($built -join "`n") 'the rows needing admin say so'
+
+# A bare install -- nothing in ~/.ssm but the script -- offers nothing.
+Remove-Item (Join-Path $rowsDir 'config.json') -Force
+Remove-Item $AWS_CLI_DIR, $SSM_PLUGIN_DIR -Recurse -Force
+Set-Content (Join-Path $rowsDir 'ssm.ps1') '# script'
+Assert-Eq 0 (Get-SsmUninstallRows).Count 'a bare install offers nothing optional'
+Remove-Item $rowsDir -Recurse -Force -ErrorAction SilentlyContinue
+
 $ARG_PURGE = ''; $ARG_WITH_DEPS = ''
 $rows = [string[]]@("config`t~/.ssm", "junegunn.fzf`tfzf", "Amazon.AWSCLI`tAWS CLI v2")
 Assert-Eq '' ((Get-SsmUninstallFlaggedKeys $rows) -join ' ') 'neither flag selects nothing'

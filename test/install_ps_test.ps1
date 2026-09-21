@@ -5,6 +5,11 @@
 #
 # Run: pwsh -File test/install_ps_test.ps1
 
+# Recorded before the dot-source: the point of the assertion below is that
+# sourcing does not CHANGE this, and the ambient value is not ours to predict
+# -- GitHub Actions' pwsh wrapper pre-sets it to Stop.
+$preferenceBefore = $ErrorActionPreference
+
 $here = Split-Path -Parent $PSCommandPath
 . (Join-Path $here '../install.ps1')
 
@@ -26,9 +31,10 @@ function Assert-True {
 Write-Host 'dot-sourcing install.ps1'
 
 Assert-True (Get-Command Get-SsmAssetUrl -ErrorAction SilentlyContinue) 'the helper is defined'
-# The guard sits above $ErrorActionPreference precisely so this stays Continue:
-# a dot-sourced script sets preference variables in the caller's scope.
-Assert-Eq 'Continue' $ErrorActionPreference 'sourcing stops before the Stop preference'
+# The guard sits above install.ps1's $ErrorActionPreference assignment
+# precisely so this is unchanged: a dot-sourced script sets preference
+# variables in the caller's scope, which would leak Stop into the harness.
+Assert-Eq $preferenceBefore $ErrorActionPreference 'sourcing does not change the error preference'
 Assert-Eq $null (Get-Command Write-Fail -ErrorAction SilentlyContinue) 'sourcing stops before the install helpers'
 
 Write-Host 'Get-SsmAssetUrl'

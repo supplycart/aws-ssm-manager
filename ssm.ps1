@@ -2159,19 +2159,21 @@ function Get-SsmUninstallRows {
     $leftovers = @(Get-ChildItem -LiteralPath $script:SSM_DIR -Force -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -cne 'ssm.ps1' -and $_.Name -cne 'ssm.cmd' })
     if ($leftovers.Count) {
-        $rows.Add("config`t{0,-24} {1}" -f (Get-SsmShortPath $script:SSM_DIR), 'config.json, db ports, kubeconfig')
+        # The -f expression is parenthesised: without it, the comma is read as
+        # an argument separator for .Add() rather than as part of the format.
+        $rows.Add(("config`t{0,-24} {1}" -f (Get-SsmShortPath $script:SSM_DIR), 'config.json, db ports, kubeconfig'))
     }
 
     foreach ($id in (Get-SsmWingetPackages)) {
         $label = if ($id -ceq 'Kubernetes.kubectl') { 'kubectl' } elseif ($id -ceq 'junegunn.fzf') { 'fzf' } else { $id }
-        $rows.Add("$id`t{0,-24} winget uninstall {1}" -f $label, $id)
+        $rows.Add(("$id`t{0,-24} winget uninstall {1}" -f $label, $id))
     }
 
     if (Test-Path -LiteralPath $script:AWS_CLI_DIR) {
-        $rows.Add("Amazon.AWSCLI`t{0,-24} {1} (admin)" -f 'AWS CLI v2', $script:AWS_CLI_DIR)
+        $rows.Add(("Amazon.AWSCLI`t{0,-24} {1} (admin)" -f 'AWS CLI v2', $script:AWS_CLI_DIR))
     }
     if (Test-Path -LiteralPath $script:SSM_PLUGIN_DIR) {
-        $rows.Add("Amazon.SessionManagerPlugin`t{0,-24} {1} (admin)" -f 'session-manager-plugin', $script:SSM_PLUGIN_DIR)
+        $rows.Add(("Amazon.SessionManagerPlugin`t{0,-24} {1} (admin)" -f 'session-manager-plugin', $script:SSM_PLUGIN_DIR))
     }
     return , ([string[]]$rows)
 }
