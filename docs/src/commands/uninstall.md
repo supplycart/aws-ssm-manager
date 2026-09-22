@@ -32,9 +32,10 @@ Always removed: the `/usr/local/bin/ssm` symlink and `~/.ssm/ssm.sh`. A
 
 ### Windows
 
-Always removed: `%USERPROFILE%\.ssm\ssm.ps1`, the `ssm.cmd` shim, the
-`%USERPROFILE%\.ssm` entry in your user PATH, and the Start Menu and Desktop
-shortcuts. An `ssm.cmd` that is not the one ssm installed is left alone.
+Always removed: `%USERPROFILE%\.ssm\ssm.ps1`, the `bin\ssm.cmd` shim (and the
+`%USERPROFILE%\.ssm\ssm.cmd` one from v1.2.5 and earlier), their entries in
+your user PATH, and the Start Menu and Desktop shortcuts. An `ssm.cmd` that is
+not the one ssm installed is left alone.
 
 | Item                                                          | Removed with               |
 | ------------------------------------------------------------- | -------------------------- |

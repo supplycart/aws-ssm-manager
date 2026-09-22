@@ -1935,7 +1935,15 @@ function Invoke-SsmConfig {
 
 $SSM_DIR = Join-Path $HOME '.ssm'
 $SSM_SCRIPT = Join-Path $SSM_DIR 'ssm.ps1'
-$SSM_LAUNCHER = Join-Path $SSM_DIR 'ssm.cmd'
+# Only bin\ goes on the PATH, the way only /usr/local/bin/ssm does on macOS.
+# PowerShell resolves a bare `ssm` to ssm.ps1 ahead of ssm.cmd when both sit in
+# one PATH directory, so with %USERPROFILE%\.ssm itself on the PATH, Windows
+# PowerShell 5.1 ran this script directly -- past the shim that hands it to
+# pwsh -- and stopped at #Requires -Version 7.2.
+$SSM_BIN_DIR = Join-Path $SSM_DIR 'bin'
+$SSM_LAUNCHER = Join-Path $SSM_BIN_DIR 'ssm.cmd'
+# Where v1.2.5 and earlier put the shim, with %USERPROFILE%\.ssm on the PATH.
+$SSM_LEGACY_LAUNCHER = Join-Path $SSM_DIR 'ssm.cmd'
 
 # The shim that makes the bare word `ssm` resolve from cmd.exe, PowerShell and
 # Windows Terminal: .ps1 is not in PATHEXT and cmd.exe cannot run one anyway.
@@ -1952,7 +1960,7 @@ where /q pwsh.exe && goto :run
 set "PATH=%ProgramFiles%\PowerShell\7;%LOCALAPPDATA%\Microsoft\PowerShell\7;%PATH%"
 where /q pwsh.exe || goto :nopwsh
 :run
-pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
+pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\ssm.ps1" %*
 exit /b %ERRORLEVEL%
 :nopwsh
 echo ssm needs PowerShell 7. Install it with:  winget install Microsoft.PowerShell 1>&2
@@ -1968,6 +1976,20 @@ $SSM_LAUNCHER_LEGACY_TEXT = @(
 @echo off
 pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
 exit /b %ERRORLEVEL%
+"@,
+    # v1.2.4-v1.2.5: the same shim, when it lived beside ssm.ps1.
+    @"
+@echo off
+setlocal
+where /q pwsh.exe && goto :run
+set "PATH=%ProgramFiles%\PowerShell\7;%LOCALAPPDATA%\Microsoft\PowerShell\7;%PATH%"
+where /q pwsh.exe || goto :nopwsh
+:run
+pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
+exit /b %ERRORLEVEL%
+:nopwsh
+echo ssm needs PowerShell 7. Install it with:  winget install Microsoft.PowerShell 1>&2
+exit /b 9009
 "@
 )
 
@@ -1975,6 +1997,7 @@ function Write-SsmLauncher {
     param([string]$Path)
     # CRLF and ASCII, no BOM: all three matter to cmd.exe.
     $text = ($script:SSM_LAUNCHER_TEXT -replace "`r?`n", "`r`n") + "`r`n"
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force)
     [System.IO.File]::WriteAllText($Path, $text, [System.Text.ASCIIEncoding]::new())
 }
 
@@ -2188,25 +2211,35 @@ public static extern IntPtr SendMessageTimeout(
         [IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$unused)
 }
 
-# Puts %USERPROFILE%\.ssm back on the user PATH if it has gone missing, and
-# announces the environment either way. Idempotent, and deliberately silent on
-# failure: nothing here is worth failing an update over.
+# The user PATH with ssm's entry in place: bin\ added if missing, and the
+# %USERPROFILE%\.ssm entry that v1.2.5 and earlier used taken out -- left in, it
+# keeps PowerShell resolving `ssm` to ssm.ps1 instead of the shim. Every other
+# entry keeps its place and its spelling.
+function Get-SsmRepairedPath {
+    param([string]$PathValue, [string]$BinDir, [string]$LegacyDir)
+    $kept = Remove-SsmPathEntry $PathValue $LegacyDir
+    foreach ($part in ($kept -split ';')) {
+        if ($part -and ($part.TrimEnd('\') -eq $BinDir.TrimEnd('\'))) { return $kept }
+    }
+    if ($kept) { return "$kept;$BinDir" }
+    return $BinDir
+}
+
+# Puts ssm's bin\ back on the user PATH if it has gone missing, moves an old
+# install off the %USERPROFILE%\.ssm entry, and announces the environment either
+# way. Idempotent, and deliberately silent on failure: nothing here is worth
+# failing an update over.
 function Repair-SsmUserPath {
+    param([switch]$Quiet)
     try {
         $key = Get-Item 'HKCU:\Environment'
         $raw = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-        $present = $false
-        foreach ($part in ($raw -split ';')) {
-            if ($part -and ($part.TrimEnd('\') -eq $script:SSM_DIR.TrimEnd('\'))) { $present = $true }
-        }
-        if (-not $present) {
-            $updated = $raw
-            if ($updated -and -not $updated.EndsWith(';')) { $updated += ';' }
-            $updated += $script:SSM_DIR
+        $updated = Get-SsmRepairedPath $raw $script:SSM_BIN_DIR $script:SSM_DIR
+        if ($updated -cne $raw) {
             $kind = 'ExpandString'
             try { $kind = $key.GetValueKind('Path') } catch { }
             [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Environment', 'Path', $updated, $kind)
-            Write-Host 'Put ssm back on your user PATH.'
+            if (-not $Quiet) { Write-Host 'Updated the ssm entry in your user PATH.' }
         }
         Publish-SsmEnvironmentChange
     } catch {
@@ -2248,7 +2281,7 @@ function Get-SsmUninstallRows {
     $rows = [System.Collections.Generic.List[string]]::new()
 
     $leftovers = @(Get-ChildItem -LiteralPath $script:SSM_DIR -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -cne 'ssm.ps1' -and $_.Name -cne 'ssm.cmd' })
+        Where-Object { $_.Name -cne 'ssm.ps1' -and $_.Name -cne 'ssm.cmd' -and $_.Name -cne 'bin' })
     if ($leftovers.Count) {
         # The -f expression is parenthesised: without it, the comma is read as
         # an argument separator for .Add() rather than as part of the format.
@@ -2293,6 +2326,8 @@ function Invoke-SsmUninstallCore {
 
     # PATH first: a failure part-way through then leaves a broken PATH entry
     # rather than one pointing at a file that is already gone.
+    # Both entries: bin\ now, and %USERPROFILE%\.ssm from v1.2.5 and earlier.
+    try { Remove-SsmUserPathEntry $script:SSM_BIN_DIR } catch { $ok = $false }
     try { Remove-SsmUserPathEntry $script:SSM_DIR } catch { $ok = $false }
 
     if (Test-Path -LiteralPath $script:SSM_START_MENU_LNK) {
@@ -2319,24 +2354,27 @@ function Invoke-SsmUninstallCore {
         }
     }
 
-    if (Test-Path -LiteralPath $script:SSM_LAUNCHER) {
-        if (Test-SsmOwnLauncher $script:SSM_LAUNCHER) {
-            if (Remove-SsmPath $script:SSM_LAUNCHER) {
-                Write-Host "Removed $(Get-SsmShortPath $script:SSM_LAUNCHER)"
+    foreach ($launcher in @($script:SSM_LAUNCHER, $script:SSM_LEGACY_LAUNCHER)) {
+        if (Test-Path -LiteralPath $launcher) {
+            if (Test-SsmOwnLauncher $launcher) {
+                if (Remove-SsmPath $launcher) {
+                    Write-Host "Removed $(Get-SsmShortPath $launcher)"
+                } else {
+                    # cmd.exe reads batch files lazily and holds the handle, so the
+                    # shell running this uninstall can still own it. There is no
+                    # next run of ssm to clean it up, so hand the job to cmd itself
+                    # -- printing the command first, so nothing happens invisibly.
+                    Write-SsmErr 'ssm.cmd is still open by the shell running this uninstall.'
+                    Write-SsmErr "Scheduling its removal:  del `"$launcher`""
+                    Start-Process cmd.exe -WindowStyle Hidden -ArgumentList '/c', `
+                        "timeout /t 3 /nobreak >nul & del /q `"$launcher`" & rd `"$($script:SSM_BIN_DIR)`" 2>nul"
+                }
             } else {
-                # cmd.exe reads batch files lazily and holds the handle, so the
-                # shell running this uninstall can still own it. There is no
-                # next run of ssm to clean it up, so hand the job to cmd itself
-                # -- printing the command first, so nothing happens invisibly.
-                Write-SsmErr 'ssm.cmd is still open by the shell running this uninstall.'
-                Write-SsmErr "Scheduling its removal:  del `"$($script:SSM_LAUNCHER)`""
-                Start-Process cmd.exe -WindowStyle Hidden -ArgumentList '/c', `
-                    "timeout /t 3 /nobreak >nul & del /q `"$($script:SSM_LAUNCHER)`""
+                Write-SsmErr "Left $launcher alone: it is not the shim ssm installed."
             }
-        } else {
-            Write-SsmErr "Left $($script:SSM_LAUNCHER) alone: it is not the shim ssm installed."
         }
     }
+    try { Remove-Item -LiteralPath $script:SSM_BIN_DIR -ErrorAction Stop } catch { }
 
     # Only succeeds when nothing the user might want back is still in there.
     try { Remove-Item -LiteralPath $script:SSM_DIR -ErrorAction Stop } catch { }
@@ -2442,7 +2480,7 @@ function Invoke-SsmUninstall {
 # PLATFORM-TOKEN	~/.ssm/config.json	%USERPROFILE%\.ssm\config.json
 # PLATFORM-TOKEN	~/.ssm/kubeconfig	%USERPROFILE%\.ssm\kubeconfig
 # PLATFORM-TOKEN	~/.ssm/ssm.sh	%USERPROFILE%\.ssm\ssm.ps1
-# PLATFORM-TOKEN	/usr/local/bin/ssm	%USERPROFILE%\.ssm\ssm.cmd
+# PLATFORM-TOKEN	/usr/local/bin/ssm	%USERPROFILE%\.ssm\bin\ssm.cmd
 # PLATFORM-TOKEN	~/.ssm	%USERPROFILE%\.ssm
 # PLATFORM-TOKEN	~/.aws	%USERPROFILE%\.aws
 # PLATFORM-TOKEN	brew install kubernetes-cli	winget install Kubernetes.kubectl
@@ -2592,7 +2630,7 @@ ssm uninstall — Remove ssm, and optionally its config and dependencies.
 
   ssm uninstall [--yes] [--purge] [--with-deps]
 
-Always removes %USERPROFILE%\.ssm\ssm.cmd and %USERPROFILE%\.ssm\ssm.ps1, then opens a checklist of
+Always removes %USERPROFILE%\.ssm\bin\ssm.cmd and %USERPROFILE%\.ssm\ssm.ps1, then opens a checklist of
 what else is present: %USERPROFILE%\.ssm (config, db ports, kubeconfig) and the dependencies
 install.ps1 adds -- fzf, kubectl, AWS CLI v2 and the Session Manager plugin.
 Nothing on the checklist is removed unless you mark it; other tools may rely on
@@ -2716,6 +2754,25 @@ function Invoke-SsmMain {
     # blocks, which is why the replace itself can give up on the cleanup.
     Get-ChildItem -LiteralPath $script:SSM_DIR -Filter '*.old' -File -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+
+    # An install from v1.2.5 or earlier, including one that `ssm update` moved
+    # to this version: the update ran the old script's code, which rewrote the
+    # old shim beside ssm.ps1. Move it into bin\ once, here. The old shim stays
+    # where it is -- it may be the batch file running us, and cmd.exe reads
+    # those lazily -- but off the PATH it resolves nothing; uninstall removes it.
+    # Not before an uninstall, which removes both anyway.
+    if (($Argv.Count -eq 0 -or $Argv[0] -cne 'uninstall') -and
+        (Test-SsmOwnLauncher $script:SSM_LEGACY_LAUNCHER) -and
+        -not (Test-Path -LiteralPath $script:SSM_LAUNCHER)) {
+        try {
+            # stderr, and once: a scripted `ssm ... | ...` must not see it.
+            Write-SsmLauncher $script:SSM_LAUNCHER
+            Repair-SsmUserPath -Quiet
+            Write-SsmErr "Moved the ssm shim to $(Get-SsmShortPath $script:SSM_LAUNCHER); open a new terminal to pick it up."
+        } catch {
+            Write-SsmErr "Could not move the ssm shim: $($_.Exception.Message)"
+        }
+    }
 
     $script:COMMAND = if ($Argv.Count -gt 0) { $Argv[0] } else { '' }
     # Assigned in two statements on purpose: `$x = if (...) {...} else { @() }`

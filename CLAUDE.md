@@ -55,8 +55,12 @@ and nowhere else:
   undo than the macOS one, which already leaks the entry on a hard kill.
 - **Dependencies** — Homebrew vs winget. `install.ps1` does **not** bootstrap winget the way
   `install.sh` bootstraps Homebrew; winget ships with Windows 11.
-- **PATH** — a `/usr/local/bin/ssm` symlink vs `%USERPROFILE%\.ssm` on the user PATH plus an
-  `ssm.cmd` shim. No symlink, so Developer Mode is never needed; nothing in `install.ps1` elevates.
+- **PATH** — a `/usr/local/bin/ssm` symlink vs `%USERPROFILE%\.ssm\bin` on the user PATH, holding
+  only an `ssm.cmd` shim. **Never put `%USERPROFILE%\.ssm` itself on the PATH:** PowerShell
+  resolves a bare name to a `.ps1` ahead of a `.cmd` in the same directory, so 5.1 would run
+  `ssm.ps1` directly and die on `#Requires -Version 7.2` (shipped in v1.2.5). Installs from before
+  the move are migrated by `install.ps1`, by `Repair-SsmUserPath`, and once at startup in
+  `Invoke-SsmMain`; the old shim's text is in `$SSM_LAUNCHER_LEGACY_TEXT`. No symlink, so Developer Mode is never needed; nothing in `install.ps1` elevates.
   **Writing `HKCU:\Environment` is only half of it:** Explorer hands every process it starts the
   environment it cached at sign-in, so without a `WM_SETTINGCHANGE` broadcast even a brand-new
   terminal gets the old PATH — which is what shipped in v1.2.3 and made `ssm` unrecognised until

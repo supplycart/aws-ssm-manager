@@ -285,6 +285,13 @@ Assert-Eq 'C:\a;C:\b' (Remove-SsmPathEntry 'C:\a;C:\ssm\;C:\b' 'C:\ssm') 'a trai
 Assert-Eq 'C:\a;C:\b' (Remove-SsmPathEntry 'C:\a;C:\b' 'C:\ssm') 'an absent entry changes nothing'
 Assert-Eq 'C:\a;C:\b' (Remove-SsmPathEntry 'C:\a;;C:\b' 'C:\ssm') 'empty segments are dropped'
 Assert-Eq 'C:\a' (Remove-SsmPathEntry 'C:\a;C:\ssm;C:\ssm' 'C:\ssm') 'a duplicated entry goes entirely'
+
+Write-Host 'Get-SsmRepairedPath'
+Assert-Eq 'C:\a;C:\ssm\bin' (Get-SsmRepairedPath 'C:\a' 'C:\ssm\bin' 'C:\ssm') 'bin is appended'
+Assert-Eq 'C:\a;C:\b;C:\ssm\bin' (Get-SsmRepairedPath 'C:\a;C:\ssm;C:\b' 'C:\ssm\bin' 'C:\ssm') 'the old .ssm entry is swapped for bin'
+Assert-Eq 'C:\a;C:\ssm\bin\;C:\b' (Get-SsmRepairedPath 'C:\a;C:\ssm\bin\;C:\b' 'C:\ssm\bin' 'C:\ssm') 'bin already there keeps its place and spelling'
+Assert-Eq 'C:\ssm\bin' (Get-SsmRepairedPath '' 'C:\ssm\bin' 'C:\ssm') 'an empty PATH'
+Assert-Eq '%USERPROFILE%\x;C:\ssm\bin' (Get-SsmRepairedPath '%USERPROFILE%\x' 'C:\ssm\bin' 'C:\ssm') 'unexpanded entries survive'
 # Defined but never called here: it P/Invokes user32, which the Linux runner
 # does not have. test/parity_test.sh is what checks it is actually called.
 Assert-True (Get-Command Publish-SsmEnvironmentChange -ErrorAction SilentlyContinue) 'the PATH broadcast exists'
@@ -393,7 +400,10 @@ Assert-Contains '(admin)' ($built -join "`n") 'the rows needing admin say so'
 Remove-Item (Join-Path $rowsDir 'config.json') -Force
 Remove-Item $AWS_CLI_DIR, $SSM_PLUGIN_DIR -Recurse -Force
 Set-Content (Join-Path $rowsDir 'ssm.ps1') '# script'
-Assert-Eq 0 (Get-SsmUninstallRows).Count 'a bare install offers nothing optional'
+New-Item -ItemType Directory -Path (Join-Path $rowsDir 'bin') -Force | Out-Null
+Set-Content (Join-Path $rowsDir 'bin/ssm.cmd') '@echo off'
+Set-Content (Join-Path $rowsDir 'ssm.cmd') '@echo off'
+Assert-Eq 0 (Get-SsmUninstallRows).Count 'a bare install offers nothing optional, old shim or new'
 Remove-Item $rowsDir -Recurse -Force -ErrorAction SilentlyContinue
 
 $ARG_PURGE = ''; $ARG_WITH_DEPS = ''
