@@ -285,6 +285,9 @@ Assert-Eq 'C:\a;C:\b' (Remove-SsmPathEntry 'C:\a;C:\ssm\;C:\b' 'C:\ssm') 'a trai
 Assert-Eq 'C:\a;C:\b' (Remove-SsmPathEntry 'C:\a;C:\b' 'C:\ssm') 'an absent entry changes nothing'
 Assert-Eq 'C:\a;C:\b' (Remove-SsmPathEntry 'C:\a;;C:\b' 'C:\ssm') 'empty segments are dropped'
 Assert-Eq 'C:\a' (Remove-SsmPathEntry 'C:\a;C:\ssm;C:\ssm' 'C:\ssm') 'a duplicated entry goes entirely'
+# Defined but never called here: it P/Invokes user32, which the Linux runner
+# does not have. test/parity_test.sh is what checks it is actually called.
+Assert-True (Get-Command Publish-SsmEnvironmentChange -ErrorAction SilentlyContinue) 'the PATH broadcast exists'
 
 Write-Host 'Select-SsmPickerView'
 

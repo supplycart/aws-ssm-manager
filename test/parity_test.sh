@@ -203,6 +203,26 @@ else
   echo "  (skipped: no pwsh on this machine)"
 fi
 
+echo "every user-PATH write tells Windows about it"
+
+# The bug this pins: writing HKCU\Environment is only half of setting the PATH.
+# Without a WM_SETTINGCHANGE broadcast, Explorer keeps handing every process it
+# starts the environment it cached at logon, so even a brand-new terminal
+# cannot find ssm until the next sign-out. Counted rather than merely grepped,
+# so a second write added later without its announcement fails here too.
+for f in "$ROOT/install.ps1" "$PS"; do
+  name="${f##*/}"
+  writes=$(grep -c "Registry\]::SetValue(.*Environment.*'Path'" "$f")
+  mentions=$(grep -c 'Publish-SsmEnvironmentChange' "$f")
+  # One mention is the definition; the rest are calls.
+  calls=$((mentions > 0 ? mentions - 1 : 0))
+
+  if [[ $writes -ge 1 ]]; then pass; else fail "$name writes the user PATH"; fi
+  if [[ $calls -ge $writes ]]; then pass; else
+    fail "$name: $writes user-PATH write(s) but only $calls broadcast(s)"
+  fi
+done
+
 echo "the docs match the manifest"
 
 for cmd in $COMMANDS; do

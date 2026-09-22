@@ -2138,6 +2138,26 @@ function Remove-SsmPathEntry {
             Where-Object { $_ -and ($_.TrimEnd('\') -ne $Entry.TrimEnd('\')) }) -join ';')
 }
 
+# Explorer caches the environment it gives every process it starts, so a
+# registry write alone leaves new terminals on the old PATH until the next
+# sign-out. WM_SETTINGCHANGE is what tells it to re-read. The same broadcast
+# lives in install.ps1, for the same reason and with the same caveat about
+# [Environment]::SetEnvironmentVariable downgrading REG_EXPAND_SZ to REG_SZ.
+function Publish-SsmEnvironmentChange {
+    if (-not ('SsmUninstall.NativeMethods' -as [type])) {
+        Add-Type -Namespace 'SsmUninstall' -Name 'NativeMethods' -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $unused = [UIntPtr]::Zero
+    # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, five seconds.
+    [void][SsmUninstall.NativeMethods]::SendMessageTimeout(
+        [IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$unused)
+}
+
 function Remove-SsmUserPathEntry {
     param([string]$Entry)
     $key = Get-Item 'HKCU:\Environment'
@@ -2149,6 +2169,9 @@ function Remove-SsmUserPathEntry {
     if ($new -cne $raw) {
         $kind = $key.GetValueKind('Path')
         [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Environment', 'Path', $new, $kind)
+        # Best effort: the entry is already gone from the registry, and failing
+        # to announce it is not a reason to fail the uninstall.
+        try { Publish-SsmEnvironmentChange } catch { }
         Write-Host 'Removed the ssm entry from your user PATH (open a new terminal to see it).'
     }
 }
