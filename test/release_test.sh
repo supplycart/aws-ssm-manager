@@ -89,6 +89,38 @@ assert_eq "dev" "$(script_version "$STAMP_FIXTURE")" "refused versions leave the
 
 rm -f "$STAMP_FIXTURE"
 
+# The PowerShell script carries the same stamp in PowerShell's spelling. The
+# pattern is chosen by extension, so neither form can be stamped into the wrong
+# file -- which is what catches a version line copied from one to the other.
+PS_FIXTURE=$(mktemp -t ssm_stamp).ps1
+
+printf '#Requires -Version 7.2\n$SSM_VERSION = %s\nWrite-Host 1\n' "'dev'" > "$PS_FIXTURE"
+assert_status 0 "stamping a .ps1" stamp_version "$PS_FIXTURE" v1.2.3
+assert_contains "\$SSM_VERSION = 'v1.2.3'" "$(cat "$PS_FIXTURE")" "the PowerShell stamp reads back"
+assert_status 1 "an already stamped .ps1 is refused" stamp_version "$PS_FIXTURE" v1.2.4
+
+printf '$SSM_VERSION = %s\n$SSM_VERSION = %s\n' "'dev'" "'dev'" > "$PS_FIXTURE"
+assert_status 1 "two .ps1 version lines are refused" stamp_version "$PS_FIXTURE" v1.2.3
+assert_contains "found 2" "$LAST_OUTPUT" "duplicate PowerShell line message"
+
+# A bash line in the PowerShell file, or the reverse, is the mistake this
+# guard exists for: both are refused rather than silently shipping "dev".
+printf 'SSM_VERSION="dev"\n' > "$PS_FIXTURE"
+assert_status 1 "a bash version line in a .ps1 is refused" stamp_version "$PS_FIXTURE" v1.2.3
+assert_contains "found 0" "$LAST_OUTPUT" "wrong-form message for .ps1"
+
+SH_FIXTURE=$(mktemp -t ssm_stamp).sh
+printf '$SSM_VERSION = %s\n' "'dev'" > "$SH_FIXTURE"
+assert_status 1 "a PowerShell version line in a .sh is refused" stamp_version "$SH_FIXTURE" v1.2.3
+assert_contains "found 0" "$LAST_OUTPUT" "wrong-form message for .sh"
+
+printf '$SSM_VERSION = %s\n' "'dev'" > "$PS_FIXTURE"
+assert_status 1 "a .ps1 version that is not a tag is refused" stamp_version "$PS_FIXTURE" 1.2.3
+assert_status 1 "a .ps1 version with metacharacters is refused" stamp_version "$PS_FIXTURE" 'v1.2.3/&'
+assert_contains "\$SSM_VERSION = 'dev'" "$(cat "$PS_FIXTURE")" "refused versions leave the .ps1 alone"
+
+rm -f "$PS_FIXTURE" "$SH_FIXTURE"
+
 echo "latest_release_tag / existing_release_for"
 
 REPO_FIXTURE=$(mktemp -d)

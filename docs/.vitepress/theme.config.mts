@@ -22,6 +22,6 @@ export default {
     text: 'Edit this page on GitHub',
   },
   footer: {
-    message: 'macOS only · Apple Silicon and Intel',
+    message: 'macOS (Apple Silicon and Intel) · Windows 11',
   },
 } satisfies DefaultTheme.Config

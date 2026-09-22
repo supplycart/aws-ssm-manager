@@ -11,21 +11,27 @@ Run `ssm config` for the menu, or name the action directly:
 ssm config view   [--env <name>]
 ssm config add    --env <name> [--profile <p>] [--region <r>]
                   [--access-key <k>] [--secret-key -] [--skip-credentials]
-ssm config edit   --env <name> [--profile <p>] [--region <r>]
+                  [--force]
+ssm config edit   --env <name> [--name <new>] [--profile <p>] [--region <r>]
                   [--access-key <k>] [--secret-key -]
-ssm config delete --env <name> [--yes] [--delete-profile]
+                  [--db <identifier> --port <n>]
+ssm config delete --env <name> [--db <identifier>] [--yes] [--delete-profile]
 ```
 
 `edit` applies every field flag you pass in one go. `delete` still asks for
 confirmation unless you pass `--yes`, and keeps the AWS CLI profile unless you
 pass `--delete-profile`.
 
-| Action   | Description                                                                    |
-| -------- | ------------------------------------------------------------------------------ |
-| `view`   | Print `~/.ssm/config.json` and show masked AWS key IDs per account             |
-| `add`    | Add a new account entry and optionally configure its AWS CLI credentials       |
-| `edit`   | Edit `profile`, `region`, `aws-access-key`, or `aws-secret-key` for an account |
-| `delete` | Remove an account and optionally delete the linked AWS CLI profile             |
+Adding over an account that already exists is refused, because it would take
+that account's saved database ports with it. Pass `--force` to replace it
+anyway.
+
+| Action   | Description                                                                  |
+| -------- | ---------------------------------------------------------------------------- |
+| `view`   | Print `~/.ssm/config.json` and show masked AWS key IDs per account           |
+| `add`    | Add a new account entry and optionally configure its AWS CLI credentials     |
+| `edit`   | Rename an account, or edit `profile`, `region`, its keys, or a database port |
+| `delete` | Remove an account and optionally delete the linked AWS CLI profile           |
 
 ## Secrets
 
@@ -50,11 +56,29 @@ Prompts for:
 
 ## edit
 
+- `--name` renames the account, moving its profile, region and saved database
+  ports with it. Your `~/.aws` files are never touched: the AWS CLI profile is
+  a field on the account, not its name.
 - `profile` / `region` update `~/.ssm/config.json`
 - `aws-access-key` updates `~/.aws/credentials` via `aws configure set`
 - `aws-secret-key` updates `~/.aws/credentials` (input is hidden)
+- `--db` and `--port` go together and set the local port for one database.
+  `ssm db` assigns a free port on first use and remembers it; this is how you
+  pin a different one. A port already used by another account is a warning,
+  not an error.
+
+```sh
+ssm config edit --env staging --name stg
+ssm config edit --env staging --db sc-staging-adam-rds --port 15433
+```
 
 ## delete
 
 Removes the account from `~/.ssm/config.json` and optionally strips the AWS CLI
 profile from `~/.aws/credentials` and `~/.aws/config`.
+
+With `--db`, only that one port assignment goes and the account stays:
+
+```sh
+ssm config delete --env staging --db sc-staging-adam-rds
+```

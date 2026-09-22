@@ -5,13 +5,77 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Commands
 
 - `bash install.sh` — install dependencies and symlink `ssm` to `/usr/local/bin/ssm` on macOS
+- `pwsh install.ps1` — the Windows 11 counterpart: winget dependencies,
+  `%USERPROFILE%\.ssm`, a user-PATH entry and shortcuts
+- `ssm` (no command) — opens a menu of the commands below, on both platforms, but only when
+  stdin and stdout are a terminal and a picker is available; otherwise it prints usage and exits 1
 - `ssm ssh / ssm pod / ssm db / ssm config / ssm update / ssm uninstall / ssm version / ssm help` — end-user CLI commands
 - `bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh && bash -n .github/scripts/docs_upload.sh` — syntax check before committing
-- `bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh`
-  — unit tests for the argument, release, installer-version and docs-upload helpers; run with the
-  syntax check. CI runs the same four as the required `test` check
+- `bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh && bash test/parity_test.sh`
+  — unit tests for the argument, release, installer-version, docs-upload and cross-implementation
+  parity helpers; run with the syntax check
+- `pwsh -File test/ssm_test.ps1 && pwsh -File test/install_ps_test.ps1` — the PowerShell side, and
+  a `Parser::ParseFile` pass over `ssm.ps1`/`install.ps1` as the `bash -n` equivalent
+- CI runs all of the above inside the one required `test` job, on `ubuntu-latest` (pwsh is
+  preinstalled there). Deliberately not a windows-latest job: a second job would be green but not
+  required until someone edits the ruleset by hand
 - `cd docs && pnpm install && pnpm dev` — docs site at `http://localhost:5173/shells/aws-ssm-manager/`;
   `pnpm format` before committing (CI runs `pnpm format:check` and `pnpm build`)
+
+## Two implementations
+
+`ssm.sh` (bash 3.2, macOS) and `ssm.ps1` (PowerShell 7, Windows 11) are two implementations of one
+CLI. **Every command and every flag must exist in both.** `commands.manifest` is the source of
+truth; `test/parity_test.sh` parses both shipped scripts and fails the required `test` check if
+either disagrees. Neither implementation can satisfy it alone, which is the point.
+
+Adding or removing a flag is a change in four places: `commands.manifest`, `ssm.sh`'s `parse_args`
+call for that command, `ssm.ps1`'s `$SSM_COMMANDS` table, and the matching `docs/src/commands/`
+page. The parity test also checks the docs, which is what stops them rotting silently.
+
+`ssm.ps1` keeps its flag sets in one `$SSM_COMMANDS` table rather than inline per command, because
+that is the region the parity test parses — and because a command then cannot accept a flag it
+never declared. Every function carries a `# bash: <name> (ssm.sh:N)` anchor naming what it mirrors.
+
+The usage text in `ssm.ps1` was generated from `ssm.sh`'s heredocs and must stay byte-identical
+apart from a short list of platform tokens (`~/.ssm` ↔ `%USERPROFILE%\.ssm`, `brew install` ↔
+`winget install`, `this Mac` ↔ `this PC`).
+
+Where the two legitimately differ, the difference is recorded in `docs/src/reference/platforms.md`
+and nowhere else:
+
+- **Config parsing** — jq on macOS (with the startup check at `ssm.sh:11-15`); `ConvertFrom-Json`
+  on Windows. There is **no jq dependency on Windows** and no startup check to mirror.
+- **`ssm db` hostname** — `<identifier>.tunnel` via `/etc/hosts` on macOS, `127.0.0.1` on Windows.
+  Matching macOS would mean a UAC prompt on every run, and an elevated write that is harder to
+  undo than the macOS one, which already leaks the entry on a hard kill.
+- **Dependencies** — Homebrew vs winget. `install.ps1` does **not** bootstrap winget the way
+  `install.sh` bootstraps Homebrew; winget ships with Windows 11.
+- **PATH** — a `/usr/local/bin/ssm` symlink vs `%USERPROFILE%\.ssm` on the user PATH plus an
+  `ssm.cmd` shim. No symlink, so Developer Mode is never needed; nothing in `install.ps1` elevates.
+- **fzf** — required on macOS, optional on Windows, which falls back to a built-in console picker.
+- **Pinned install** — a positional argument vs `$env:SSM_INSTALL_VERSION`, because `irm | iex`
+  cannot take arguments.
+
+PowerShell traps this port already hit, all of them caught by `test/ssm_test.ps1`:
+
+- Variable names are **case-insensitive**, so `$account = ... $Account` silently clobbers the
+  parameter. Locals that shadow a parameter get a different name.
+- `-eq`, `-contains`, `switch` and hashtable keys are case-insensitive too, so the arg parser uses
+  `-ceq`/`-cne`/`-clike`, `switch -CaseSensitive` and `StringComparer.Ordinal`. bash's `case` is
+  case-sensitive, and `--ENV` must stay an unknown option.
+- `ConvertTo-Json` defaults to `-Depth 2`; the config nests three deep, so every call passes
+  `-Depth 100` or the db ports serialise as a type name.
+- `$x = if (...) {...} else { @() }` unrolls the empty array to `$null`. Functions returning a
+  possibly-empty array use `return , ([string[]]@(...))`.
+- A function returns everything on the success stream, so the exit code travels as an exception
+  (`Exit-Ssm`) and prompts go to `Write-Host`, never `Write-Output`.
+- `$Host`, `$args`, `$input` and `$profile` are automatic variables; don't shadow them.
+
+`install.ps1` targets **Windows PowerShell 5.1** as well as 7, because that is what the Start Menu
+gives you and where the one-liner gets pasted. No ternaries, no `??`, no `$IsWindows`. Its source
+guard is `if ($MyInvocation.InvocationName -eq '.') { return }`, and `$ErrorActionPreference` must
+stay **below** it: a dot-sourced script sets preference variables in the caller's scope.
 
 ## Architecture
 
@@ -86,19 +150,29 @@ drives three constraints:
 - `docs_upload_plan` in `.github/scripts/docs_upload.sh` (tested by `test/docs_upload_test.sh`)
   gives every file an explicit content type, since the CDN sends `nosniff`; add an extension there
   before the build starts emitting it. It lists pages after assets and refuses any build holding a
-  `.sh` file or a `vX.Y.Z/` folder. Nothing in the docs deploy deletes.
+  `.sh`, `.ps1` or `.cmd` file or a `vX.Y.Z/` folder — those are release file names, and the docs
+  share the prefix with them. `docs_content_type` deliberately has no entry for those three.
+  Nothing in the docs deploy deletes.
 - A redirect rule on the `supplycart.my` zone, managed in the Cloudflare dashboard, sends exactly
   `/shells/aws-ssm-manager` and `/shells/aws-ssm-manager/` to `index.html`. Never widen it to a
   prefix match: that would redirect `install.sh` and `ssm update`.
 
 `VersionPicker.vue` on the install page reads releases from the GitHub API in the browser, so a
-release needs no docs deploy. Its CDN URL must match `install.sh`.
+release needs no docs deploy. It has a macOS/Windows switch, defaulted from the visitor's platform
+in `onMounted` (the component is server-rendered at build time, where `navigator` does not exist).
+Its two CDN URLs must match `install.sh` and `install.ps1`.
 
 `.github/workflows/deploy.yml` releases every push to `master` once the reusable `test.yml` passes:
 1. Picks the next `vX.Y.Z` from the last tag and the merged PR's `release:minor` / `release:major` label.
 2. Refuses to go on unless the tag ruleset is active.
-3. Stamps `SSM_VERSION` into `ssm.sh` on a commit reachable only from the new tag, and pushes that tag.
-4. Uploads `ssm.sh` and `install.sh` to the R2 bucket `supplycart-cdn` under `shells/aws-ssm-manager/vX.Y.Z/`, then `shells/aws-ssm-manager/`, then the legacy `shells/` (see below).
+3. Stamps the version into `ssm.sh` and `ssm.ps1` on a commit reachable only from the new tag, and pushes that tag.
+4. Uploads `ssm.sh`, `install.sh`, `ssm.ps1` and `install.ps1` to the R2 bucket `supplycart-cdn`
+   under `shells/aws-ssm-manager/vX.Y.Z/` and `shells/aws-ssm-manager/`. The `.ps1` files are
+   uploaded with an explicit `text/plain` content type: without one R2 serves them as
+   octet-stream, and `Invoke-RestMethod` then hands `iex` a `byte[]` it cannot execute.
+   `ssm.cmd` is **not** a release artefact — `install.ps1` writes it locally, because cmd.exe is
+   unforgiving about line endings and a BOM. Only the two bash files go to the legacy `shells/`
+   (see below).
 5. Publishes a GitHub release.
 
 The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/release_test.sh`).
@@ -115,11 +189,15 @@ The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/
   `supplycart-bot`.
 - Rulesets are managed in the GitHub UI (Settings → Rules → Rulesets), not in the repo.
 
-The CDN URLs are hard-coded in `install.sh` and in `cmd_update()` in `ssm.sh`. Do not change them
-without a migration plan — already-installed clients pull updates from those exact paths.
+The CDN URLs are hard-coded in `install.sh`, `install.ps1`, `cmd_update()` in `ssm.sh` and
+`$SSM_CDN_BASE` in `ssm.ps1`, plus both entries in `VersionPicker.vue`. Do not change them without
+a migration plan — already-installed clients pull updates from those exact paths.
+`test/parity_test.sh` asserts each script names the base exactly once.
 
 The scripts moved from `shells/` to `shells/aws-ssm-manager/` after v1.1.0, to leave room for
 other shells. Installs from before the move still update from `shells/ssm.sh`, so the deploy
 keeps mirroring the latest `ssm.sh` and `install.sh` to `shells/`. Don't remove that mirror while
-such installs may still exist. The deploy also copies every old `shells/vX.Y.Z/` release into
-the new layout, skipping versions already copied.
+such installs may still exist. That mirror is **frozen at `ssm.sh` and `install.sh`**: there has
+never been a Windows release that could read from it, so the `.ps1` files never go there. The
+deploy also copies every old `shells/vX.Y.Z/` release into the new layout, skipping versions
+already copied; that backfill loop keeps its own two-file list.

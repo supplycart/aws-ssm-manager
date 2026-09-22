@@ -12,6 +12,12 @@ permissions:
 jobs:
     # The job id is the status check the master ruleset requires.
     # Renaming it blocks every PR.
+    #
+    # The PowerShell work is steps in this job rather than a second job on a
+    # windows runner, for the same reason: a new job would be green but not
+    # required until someone edits the ruleset by hand, so a broken ssm.ps1
+    # could merge in the meantime. pwsh 7 is preinstalled on the ubuntu image
+    # and everything tested here is platform-independent.
     test:
         runs-on: ubuntu-latest
         steps:
@@ -21,5 +27,26 @@ jobs:
             - name: Syntax check
               run: bash -n install.sh && bash -n ssm.sh && bash -n .github/scripts/release.sh && bash -n .github/scripts/docs_upload.sh
 
+            # Parses without executing, which is what `bash -n` does for the
+            # other half of the CLI.
+            - name: PowerShell syntax check
+              shell: pwsh
+              run: |
+                  $failed = $false
+                  foreach ($file in 'ssm.ps1', 'install.ps1') {
+                    $errors = $null
+                    [void][System.Management.Automation.Language.Parser]::ParseFile(
+                      (Resolve-Path $file), [ref]$null, [ref]$errors)
+                    foreach ($e in $errors) {
+                      $failed = $true
+                      Write-Host "::error file=$file,line=$($e.Extent.StartLineNumber)::$($e.Message)"
+                    }
+                  }
+                  if ($failed) { exit 1 }
+
             - name: Unit tests
-              run: bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh
+              run: bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh && bash test/parity_test.sh
+
+            - name: PowerShell unit tests
+              shell: pwsh
+              run: ./test/ssm_test.ps1 && ./test/install_ps_test.ps1

@@ -49,25 +49,37 @@ bump_from_labels() {
 }
 
 # stamp_version <file> <tag>
-# Rewrites the SSM_VERSION="dev" line. Fails unless there is exactly one such
-# line, so a renamed variable stops the release instead of shipping "dev".
+# Rewrites the version line: SSM_VERSION="dev" in a .sh, $SSM_VERSION = 'dev'
+# in a .ps1. Fails unless there is exactly one such line, so a renamed variable
+# -- or a bash line pasted into the PowerShell script -- stops the release
+# instead of shipping "dev".
 stamp_version() {
-  local file="$1" version="$2" count
+  local file="$1" version="$2" count dev new
 
   if [[ ! "$version" =~ $SEMVER_TAG_RE ]]; then
     echo "Error: '$version' is not a vX.Y.Z tag" >&2
     return 1
   fi
 
-  count=$(grep -c '^SSM_VERSION="dev"$' "$file" || true)
+  case "$file" in
+    *.ps1) dev="\$SSM_VERSION = 'dev'"; new="\$SSM_VERSION = '$version'" ;;
+    *)     dev="SSM_VERSION=\"dev\"";   new="SSM_VERSION=\"$version\"" ;;
+  esac
+
+  # -Fx is a fixed-string whole-line match, so the $ and the quotes in the
+  # PowerShell form carry no regex meaning.
+  count=$(grep -cFx -- "$dev" "$file" || true)
   if [[ "$count" != "1" ]]; then
-    echo "Error: expected one SSM_VERSION=\"dev\" line in $file, found ${count:-0}" >&2
+    echo "Error: expected one $dev line in $file, found ${count:-0}" >&2
     return 1
   fi
 
+  # awk compares whole lines as data, so neither the pattern nor the tag is a
+  # program. The tag is semver-checked above, and neither string can contain a
+  # backslash, which is the one thing awk -v would still interpret.
   # Written back through the same inode so the file keeps its mode.
   local tmp="$file.stamp.$$"
-  sed "s/^SSM_VERSION=\"dev\"\$/SSM_VERSION=\"$version\"/" "$file" > "$tmp" &&
+  awk -v dev="$dev" -v new="$new" '$0 == dev { $0 = new } { print }' "$file" > "$tmp" &&
     cat "$tmp" > "$file" &&
     rm -f "$tmp"
 }

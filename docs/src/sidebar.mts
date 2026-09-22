@@ -24,6 +24,7 @@ export default [
     items: [
       { text: 'AWS requirements', link: '/reference/aws-requirements' },
       { text: 'Config file', link: '/reference/config-file' },
+      { text: 'Platform differences', link: '/reference/platforms' },
     ],
   },
 ]
