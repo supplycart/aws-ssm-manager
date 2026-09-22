@@ -72,6 +72,40 @@ ssm ssh --env staging --app adam
 `ssm.cmd` is what makes the bare word `ssm` work: `.ps1` is not in `PATHEXT`,
 and `cmd.exe` cannot run a PowerShell script directly.
 
+### If `ssm` is not recognized
+
+> `The term 'ssm' is not recognized as the name of a cmdlet, function, script
+file, or operable program.`
+
+Installers up to **v1.2.3** added the PATH entry without telling Windows about
+it, so new terminals kept the environment Explorer had cached at sign-in.
+
+Either of these fixes it:
+
+- **`ssm update`**, from the Start Menu shortcut. The shortcut works even when
+  the name does not, because it points straight at the script.
+- **Run the installer again**, which repairs the PATH entry and re-announces
+  it:
+
+  ```powershell
+  irm https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1 | iex
+  ```
+
+  Note that this installs the **latest** release. If you are pinned to an older
+  one and want to stay there, set `$env:SSM_INSTALL_VERSION` to your tag first.
+
+Then open a new terminal. Signing out and back in also works, and always did.
+
+If it still does not resolve, check what actually got installed:
+
+```powershell
+Test-Path "$env:USERPROFILE\.ssm\ssm.cmd"
+(Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+```
+
+`False` means the install did not finish — run it again and read the output.
+The installer no longer closes the window when it fails.
+
 ## Versions and updates
 
 Without a version, the installer installs the latest release. With one it

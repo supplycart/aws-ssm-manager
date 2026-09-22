@@ -36,6 +36,9 @@ Assert-True (Get-Command Get-SsmAssetUrl -ErrorAction SilentlyContinue) 'the hel
 # variables in the caller's scope, which would leak Stop into the harness.
 Assert-Eq $preferenceBefore $ErrorActionPreference 'sourcing does not change the error preference'
 Assert-Eq $null (Get-Command Write-Fail -ErrorAction SilentlyContinue) 'sourcing stops before the install helpers'
+# Below the guard on purpose: it P/Invokes user32, which does not exist on the
+# Linux runner this test also has to pass on.
+Assert-Eq $null (Get-Command Publish-SsmEnvironmentChange -ErrorAction SilentlyContinue) 'the PATH broadcast stays below the guard'
 
 Write-Host 'Get-SsmAssetUrl'
 

@@ -53,6 +53,14 @@ and nowhere else:
   `install.sh` bootstraps Homebrew; winget ships with Windows 11.
 - **PATH** — a `/usr/local/bin/ssm` symlink vs `%USERPROFILE%\.ssm` on the user PATH plus an
   `ssm.cmd` shim. No symlink, so Developer Mode is never needed; nothing in `install.ps1` elevates.
+  **Writing `HKCU:\Environment` is only half of it:** Explorer hands every process it starts the
+  environment it cached at sign-in, so without a `WM_SETTINGCHANGE` broadcast even a brand-new
+  terminal gets the old PATH — which is what shipped in v1.2.3 and made `ssm` unrecognised until
+  the next sign-out. `Publish-SsmEnvironmentChange` in both `install.ps1` and `ssm.ps1` is that
+  broadcast, and `test/parity_test.sh` counts PATH writes against broadcasts so a new write cannot
+  be added without one. `[Environment]::SetEnvironmentVariable(…, 'User')` broadcasts by itself but
+  writes the value back as `REG_SZ`, which is the `REG_EXPAND_SZ` downgrade the hand-rolled
+  registry write exists to avoid — hence write by hand, broadcast by hand.
 - **fzf** — required on macOS, optional on Windows, which falls back to a built-in console picker.
 - **Pinned install** — a positional argument vs `$env:SSM_INSTALL_VERSION`, because `irm | iex`
   cannot take arguments.
@@ -76,6 +84,12 @@ PowerShell traps this port already hit, all of them caught by `test/ssm_test.ps1
 gives you and where the one-liner gets pasted. No ternaries, no `??`, no `$IsWindows`. Its source
 guard is `if ($MyInvocation.InvocationName -eq '.') { return }`, and `$ErrorActionPreference` must
 stay **below** it: a dot-sourced script sets preference variables in the caller's scope.
+
+Nothing in `install.ps1` may call `exit`. The documented entry point is `irm … | iex`, and `exit`
+inside `Invoke-Expression` terminates the *caller's* session — the window closes instantly and
+takes the error message with it, so a failed install is indistinguishable from a finished one.
+`Write-Fail` throws; a throw stops the install, stays on screen, and still exits non-zero under
+`pwsh -File`.
 
 ## Architecture
 
@@ -173,6 +187,14 @@ Its two CDN URLs must match `install.sh` and `install.ps1`.
    `ssm.cmd` is **not** a release artefact — `install.ps1` writes it locally, because cmd.exe is
    unforgiving about line endings and a BOM. Only the two bash files go to the legacy `shells/`
    (see below).
+
+   The shim **locates** pwsh rather than naming it: on a fresh machine winget has just installed
+   PowerShell 7 into a PATH the installing process cannot see, so a bare `pwsh` fails in the very
+   terminal that ran the installer. Its text lives in both `install.ps1` and `$SSM_LAUNCHER_TEXT`
+   in `ssm.ps1` (which rewrites it on `ssm update`), and `test/parity_test.sh` compares the two —
+   they must stay byte-identical. Changing it means adding the previous text to
+   `$SSM_LAUNCHER_LEGACY_TEXT`, because `Test-SsmOwnLauncher` decides whether uninstall may remove
+   a shim by comparing content, and an unrecognised one is left on disk.
 5. Publishes a GitHub release.
 
 The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/release_test.sh`).

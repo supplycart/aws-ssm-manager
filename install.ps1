@@ -45,10 +45,19 @@ $ErrorActionPreference = 'Stop'
 function Write-Info { param([string]$m) Write-Host "==> $m" -ForegroundColor Blue }
 function Write-Ok { param([string]$m) Write-Host "[ok] $m" -ForegroundColor Green }
 function Write-Warn { param([string]$m) Write-Host "[!] $m" -ForegroundColor Yellow }
+# Not `exit`. The documented way to run this is `irm ... | iex`, and `exit`
+# inside Invoke-Expression terminates the whole PowerShell session -- the
+# window closes instantly and takes the reason with it, which is how a failed
+# install looks exactly like a finished one. A throw stops the install, leaves
+# the message on screen, and still exits non-zero under `pwsh -File`.
 function Write-Fail {
     param([string]$m)
+    # Printed, then thrown terse: PowerShell's error formatter reflows what it
+    # is given into the error gutter, which destroys the line breaks in the
+    # multi-line messages below and jams URLs mid-sentence. So the readable
+    # copy goes out first and the throw only has to stop the install.
     Write-Host "[x] $m" -ForegroundColor Red
-    exit 1
+    throw 'ssm was not installed.'
 }
 
 # ---------------------------------------------------------------------------
@@ -75,7 +84,7 @@ if (-not $Version) { $Version = $env:SSM_INSTALL_VERSION }
 if (-not $Version) { $Version = 'latest' }
 
 $ssmUrl = Get-SsmAssetUrl $Version 'ssm.ps1'
-if (-not $ssmUrl) { exit 1 }
+if (-not $ssmUrl) { throw 'Nothing was installed.' }
 
 try {
     $response = Invoke-WebRequest -Uri $ssmUrl -Method Head -UseBasicParsing
@@ -198,10 +207,22 @@ Write-Ok "Installed $ssmScript"
 # reads batch files lazily and is unforgiving about line endings and a BOM,
 # so generating it locally keeps those bytes out of git and off the CDN.
 # ssm.ps1 holds the same text and rewrites it on `ssm update`.
+# It locates pwsh rather than naming it, because on a fresh machine winget has
+# just installed PowerShell 7 into a PATH this process cannot see -- so the
+# terminal that ran the installer would otherwise get "'pwsh' is not
+# recognized". setlocal keeps the widened PATH inside this one invocation.
 $launcherText = @"
 @echo off
-pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
+setlocal
+where /q pwsh.exe && goto :run
+set "PATH=%ProgramFiles%\PowerShell\7;%LOCALAPPDATA%\Microsoft\PowerShell\7;%PATH%"
+where /q pwsh.exe || goto :nopwsh
+:run
+pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
 exit /b %ERRORLEVEL%
+:nopwsh
+echo ssm needs PowerShell 7. Install it with:  winget install Microsoft.PowerShell 1>&2
+exit /b 9009
 "@
 $crlf = ($launcherText -replace "`r?`n", "`r`n") + "`r`n"
 [System.IO.File]::WriteAllText($ssmLauncher, $crlf, (New-Object System.Text.ASCIIEncoding))
@@ -216,6 +237,35 @@ if (-not (Test-Path -LiteralPath $configFile)) {
 # PATH. The user scope only, so none of this needs admin -- and no symlink,
 # which would need Developer Mode.
 # ---------------------------------------------------------------------------
+
+# Writing the registry is only half of setting the PATH. Explorer reads the
+# environment once and hands that cached copy to every process it starts, so
+# until it is told otherwise even a brand-new terminal gets the old PATH and
+# `ssm` stays unrecognised until the next sign-out. WM_SETTINGCHANGE is what
+# tells it. [Environment]::SetEnvironmentVariable broadcasts this for you, but
+# writes the value back as REG_SZ -- which is exactly the REG_EXPAND_SZ
+# downgrade the hand-rolled write below exists to avoid. So: write by hand,
+# broadcast by hand.
+function Publish-SsmEnvironmentChange {
+    if (-not ('SsmInstall.NativeMethods' -as [type])) {
+        Add-Type -Namespace 'SsmInstall' -Name 'NativeMethods' -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(
+    IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+    }
+    $unused = [UIntPtr]::Zero
+    # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, five seconds: one
+    # hung top-level window must not hold the installer open. Zero back means
+    # it timed out or aborted -- the very case those flags exist for -- and it
+    # returns that quietly, so the result has to be read or the failure is
+    # invisible and the user is back at "ssm is not recognized".
+    $sent = [SsmInstall.NativeMethods]::SendMessageTimeout(
+        [IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$unused)
+    return ($sent -ne [IntPtr]::Zero)
+}
+
 $key = Get-Item 'HKCU:\Environment'
 # DoNotExpandEnvironmentNames: the usual accessor expands %USERPROFILE% and
 # friends, and writing that back bakes the expansion in permanently and can
@@ -236,6 +286,19 @@ if ($already) {
     try { $kind = $key.GetValueKind('Path') } catch { }
     [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Environment', 'Path', $newPath, $kind)
     Write-Ok 'Added ssm to your user PATH'
+}
+# Broadcast in both branches, not just after a write: an earlier install that
+# set the entry without announcing it leaves a machine where the registry is
+# right and every new terminal still disagrees. Re-running this repairs that.
+$announced = $false
+try {
+    $announced = Publish-SsmEnvironmentChange
+} catch {
+    Write-Warn "Could not tell Windows the PATH changed: $($_.Exception.Message)"
+}
+if (-not $announced) {
+    Write-Warn 'Windows did not acknowledge the PATH change.'
+    Write-Warn 'If a new terminal cannot find ssm, sign out and back in once.'
 }
 # Usable in this session too, without reopening anything.
 $env:Path = "$env:Path;$ssmDir"
@@ -280,6 +343,28 @@ if (-not $pwshPath) {
     }
 }
 
+# Prove it rather than promise it, and prove the whole chain: that `ssm`
+# resolves, that the shim finds pwsh, and that the downloaded script runs.
+# Checking only that the shim exists would pass on a machine where ssm still
+# cannot start -- the shim was written a hundred lines ago and its presence was
+# never the doubtful part.
+$probe = ''
+$probeOk = $false
+try {
+    $probe = (& $ssmLauncher version 2>&1) -join ' '
+    $probeOk = ($LASTEXITCODE -eq 0)
+} catch {
+    $probe = $_.Exception.Message
+}
+if (-not $probeOk) {
+    Write-Warn 'ssm was installed but did not run:'
+    Write-Warn "  $probe"
+    Write-Warn "Try it directly: $ssmLauncher version"
+} elseif (-not (Get-Command ssm -ErrorAction SilentlyContinue)) {
+    # It runs, but the bare word does not resolve -- PATHEXT, almost certainly.
+    Write-Warn "ssm runs, but the name does not resolve yet; use $ssmLauncher"
+}
+
 Write-Host ''
 Write-Ok 'ssm installed.'
 Write-Host ''
@@ -288,7 +373,7 @@ Write-Host '    ssm              pick what to do from a menu'
 Write-Host '    ssm config add   add your first AWS account'
 Write-Host '    ssm help         the full flag reference'
 Write-Host ''
-Write-Host '  Already-open terminals will not see the new PATH entry.'
+Write-Host '  Terminals that were already open keep their old PATH; new ones are fine.'
 if ($Version -cne 'latest') {
     Write-Host ''
     Write-Warn "Pinned to $Version. Running 'ssm update' later moves it to the latest release."

@@ -203,6 +203,42 @@ else
   echo "  (skipped: no pwsh on this machine)"
 fi
 
+echo "every user-PATH write tells Windows about it"
+
+# The bug this pins: writing HKCU\Environment is only half of setting the PATH.
+# Without a WM_SETTINGCHANGE broadcast, Explorer keeps handing every process it
+# starts the environment it cached at logon, so even a brand-new terminal
+# cannot find ssm until the next sign-out. Counted rather than merely grepped,
+# so a second write added later without its announcement fails here too.
+for f in "$ROOT/install.ps1" "$PS"; do
+  name="${f##*/}"
+  # Any of the ways PowerShell can write that value, not just the one spelling
+  # in use today: Set-/New-ItemProperty and a split-across-lines SetValue would
+  # all leave a machine needing a sign-out.
+  writes=$(grep -cE "(Registry\]::SetValue|Set-ItemProperty|New-ItemProperty).*(Environment|HKCU)" "$f")
+  # Call sites only: not the definition, and not a comment naming the function
+  # -- either would let a mention stand in for actually calling it.
+  calls=$(grep -F 'Publish-SsmEnvironmentChange' "$f" |
+    grep -v '^[[:space:]]*#' |
+    grep -cv 'function Publish-SsmEnvironmentChange')
+
+  if [[ $writes -ge 1 ]]; then pass; else fail "$name writes the user PATH"; fi
+  if [[ $calls -ge $writes ]]; then pass; else
+    fail "$name: $writes user-PATH write(s) but only $calls broadcast call(s)"
+  fi
+done
+
+echo "both implementations write the same ssm.cmd"
+
+# install.ps1 writes the shim and `ssm update` rewrites it, so the two copies
+# have to agree -- and Test-SsmOwnLauncher compares content byte for byte, so
+# a drift would make uninstall refuse to remove a shim ssm itself wrote.
+shim_of() {
+  awk '/^@echo off$/ { on = 1 } on { print } /^exit \/b 9009$/ { exit }' "$1"
+}
+assert_eq "$(shim_of "$ROOT/install.ps1")" "$(shim_of "$PS")" 'the ssm.cmd text matches'
+if [[ -n "$(shim_of "$PS")" ]]; then pass; else fail 'the ssm.cmd text was found at all'; fi
+
 echo "the docs match the manifest"
 
 for cmd in $COMMANDS; do
