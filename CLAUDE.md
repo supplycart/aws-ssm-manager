@@ -19,6 +19,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - CI runs all of the above inside the one required `test` job, on `ubuntu-latest` (pwsh is
   preinstalled there). Deliberately not a windows-latest job: a second job would be green but not
   required until someone edits the ruleset by hand
+- `.github/workflows/install-windows.yml` runs the real `irm | iex` install on `windows-latest`
+  under Windows PowerShell 5.1 and pwsh 7: on PRs touching the `.ps1` files (this commit, served
+  from a local HTTP server) and after every release (from the CDN, called by `deploy.yml`). It is
+  not part of the required check; add its two jobs to the ruleset to make it block
 - `cd docs && pnpm install && pnpm dev` — docs site at `http://localhost:5173/shells/aws-ssm-manager/`;
   `pnpm format` before committing (CI runs `pnpm format:check` and `pnpm build`)
 
@@ -84,6 +88,11 @@ PowerShell traps this port already hit, all of them caught by `test/ssm_test.ps1
 gives you and where the one-liner gets pasted. No ternaries, no `??`, no `$IsWindows`. Its source
 guard is `if ($MyInvocation.InvocationName -eq '.') { return }`, and `$ErrorActionPreference` must
 stay **below** it: a dot-sourced script sets preference variables in the caller's scope.
+
+Never `Parser::ParseFile` a downloaded file in `install.ps1`: 5.1 reads a BOM-less file in the
+ANSI code page, and the UTF-8 box/dash characters in `ssm.ps1` then decode into curly quotes that
+end strings early. Read it as UTF-8 and use `ParseInput` — the v1.2.x installer failed every 5.1
+install with "is not a valid script" this way.
 
 Nothing in `install.ps1` may call `exit`. The documented entry point is `irm … | iex`, and `exit`
 inside `Invoke-Expression` terminates the *caller's* session — the window closes instantly and

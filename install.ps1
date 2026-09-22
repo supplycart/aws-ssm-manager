@@ -191,8 +191,14 @@ $staged = "$ssmScript.new"
 Invoke-WebRequest -Uri $ssmUrl -OutFile $staged -UseBasicParsing
 
 # A truncated download would install an ssm that cannot even update itself.
+# ParseInput on text decoded as UTF-8, never ParseFile: Windows PowerShell 5.1
+# -- where this usually runs -- reads a BOM-less file in the ANSI code page,
+# which turns the UTF-8 box and dash characters in ssm.ps1 into curly quotes
+# that end its strings early. pwsh reads the same file as UTF-8 and is fine
+# with it, so ParseFile here rejected every good download.
 $parseErrors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($staged, [ref]$null, [ref]$parseErrors)
+$stagedText = [System.IO.File]::ReadAllText($staged, (New-Object System.Text.UTF8Encoding $false))
+[void][System.Management.Automation.Language.Parser]::ParseInput($stagedText, [ref]$null, [ref]$parseErrors)
 if ($parseErrors.Count) {
     Remove-Item $staged -Force -ErrorAction SilentlyContinue
     Write-Fail "The download from $ssmUrl is not a valid script."
