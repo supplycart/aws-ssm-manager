@@ -9,8 +9,8 @@ hero:
   text: AWS SSM Manager
   tagline: Shell into EC2 instances, ECS containers and EKS pods, and tunnel to RDS, through AWS Systems Manager. No bastion host, no open SSH ports.
   image:
-    src: /supplycart.png
-    alt: Supplycart
+    src: /aws-ssm.svg
+    alt: AWS Systems Manager
   actions:
     - theme: brand
       text: Install
