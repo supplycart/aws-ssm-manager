@@ -3,7 +3,7 @@
 CONFIG_FILE="$HOME/.ssm/config.json"
 # The release workflow rewrites this line to the release tag (stamp_version in
 # .github/scripts/release.sh), so it must stay exactly SSM_VERSION="dev" here.
-SSM_VERSION="dev"
+SSM_VERSION="v1.2.3"
 # Set by the dispatch block at the bottom. Only used to name the command in
 # error and usage messages.
 COMMAND=""
