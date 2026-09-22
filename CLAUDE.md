@@ -187,6 +187,14 @@ Its two CDN URLs must match `install.sh` and `install.ps1`.
    `ssm.cmd` is **not** a release artefact — `install.ps1` writes it locally, because cmd.exe is
    unforgiving about line endings and a BOM. Only the two bash files go to the legacy `shells/`
    (see below).
+
+   The shim **locates** pwsh rather than naming it: on a fresh machine winget has just installed
+   PowerShell 7 into a PATH the installing process cannot see, so a bare `pwsh` fails in the very
+   terminal that ran the installer. Its text lives in both `install.ps1` and `$SSM_LAUNCHER_TEXT`
+   in `ssm.ps1` (which rewrites it on `ssm update`), and `test/parity_test.sh` compares the two —
+   they must stay byte-identical. Changing it means adding the previous text to
+   `$SSM_LAUNCHER_LEGACY_TEXT`, because `Test-SsmOwnLauncher` decides whether uninstall may remove
+   a shim by comparing content, and an unrecognised one is left on disk.
 5. Publishes a GitHub release.
 
 The shell logic lives in `.github/scripts/release.sh` (sourced, tested by `test/release_test.sh`).

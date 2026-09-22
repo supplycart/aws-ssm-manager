@@ -1942,11 +1942,34 @@ $SSM_LAUNCHER = Join-Path $SSM_DIR 'ssm.cmd'
 # Kept here rather than downloaded, because cmd.exe reads batch files lazily and
 # is unforgiving about both line endings and a BOM -- generating it locally keeps
 # those bytes out of git and off the CDN. install.ps1 writes the same text.
+# It locates pwsh rather than naming it: a machine that has just installed
+# PowerShell 7 has it on the machine PATH but not in the environment of any
+# process started before that. setlocal keeps the widened PATH to one run.
 $SSM_LAUNCHER_TEXT = @"
+@echo off
+setlocal
+where /q pwsh.exe && goto :run
+set "PATH=%ProgramFiles%\PowerShell\7;%LOCALAPPDATA%\Microsoft\PowerShell\7;%PATH%"
+where /q pwsh.exe || goto :nopwsh
+:run
+pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
+exit /b %ERRORLEVEL%
+:nopwsh
+echo ssm needs PowerShell 7. Install it with:  winget install Microsoft.PowerShell 1>&2
+exit /b 9009
+"@
+
+# Shims written by an earlier ssm. Uninstall asks "is this shim ours?" by
+# comparing content, so a shim from before the pwsh-locating rewrite must still
+# be recognised -- otherwise upgrading and then uninstalling leaves ssm.cmd
+# behind with "it is not the shim ssm installed".
+$SSM_LAUNCHER_LEGACY_TEXT = @(
+    @"
 @echo off
 pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
 exit /b %ERRORLEVEL%
 "@
+)
 
 function Write-SsmLauncher {
     param([string]$Path)
@@ -2045,6 +2068,11 @@ function Invoke-SsmUpdate {
         Invoke-SsmSelfReplace $script:SSM_SCRIPT $tmp
         # Refresh the shim too, so a future change to it can actually ship.
         Write-SsmLauncher $script:SSM_LAUNCHER
+        # Installers up to v1.2.3 wrote the PATH entry without broadcasting it,
+        # leaving machines where the Start Menu shortcut is the only way in.
+        # Such a user reaches update but not a terminal, so repair it here --
+        # otherwise the one command they can run cannot fix what is wrong.
+        Repair-SsmUserPath
 
         if ($newVersion -ceq $script:SSM_VERSION) {
             Write-Host "ssm is already at $($script:SSM_VERSION)."
@@ -2099,8 +2127,10 @@ function Test-SsmOwnLauncher {
     param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { return $false }
     $actual = ([System.IO.File]::ReadAllText($Path) -replace "`r`n", "`n").Trim()
-    $expected = ($script:SSM_LAUNCHER_TEXT -replace "`r`n", "`n").Trim()
-    return ($actual -ceq $expected)
+    foreach ($known in @($script:SSM_LAUNCHER_TEXT) + $script:SSM_LAUNCHER_LEGACY_TEXT) {
+        if ($actual -ceq ($known -replace "`r`n", "`n").Trim()) { return $true }
+    }
+    return $false
 }
 
 # bash: uninstall_rm (ssm.sh:1517)
@@ -2156,6 +2186,32 @@ public static extern IntPtr SendMessageTimeout(
     # HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG, five seconds.
     [void][SsmUninstall.NativeMethods]::SendMessageTimeout(
         [IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$unused)
+}
+
+# Puts %USERPROFILE%\.ssm back on the user PATH if it has gone missing, and
+# announces the environment either way. Idempotent, and deliberately silent on
+# failure: nothing here is worth failing an update over.
+function Repair-SsmUserPath {
+    try {
+        $key = Get-Item 'HKCU:\Environment'
+        $raw = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+        $present = $false
+        foreach ($part in ($raw -split ';')) {
+            if ($part -and ($part.TrimEnd('\') -eq $script:SSM_DIR.TrimEnd('\'))) { $present = $true }
+        }
+        if (-not $present) {
+            $updated = $raw
+            if ($updated -and -not $updated.EndsWith(';')) { $updated += ';' }
+            $updated += $script:SSM_DIR
+            $kind = 'ExpandString'
+            try { $kind = $key.GetValueKind('Path') } catch { }
+            [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Environment', 'Path', $updated, $kind)
+            Write-Host 'Put ssm back on your user PATH.'
+        }
+        Publish-SsmEnvironmentChange
+    } catch {
+        Write-SsmErr "Could not refresh your PATH: $($_.Exception.Message)"
+    }
 }
 
 function Remove-SsmUserPathEntry {

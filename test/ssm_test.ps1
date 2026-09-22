@@ -359,6 +359,13 @@ Assert-True (Test-SsmOwnLauncher $ours) 'the shim we wrote is recognised as ours
 Assert-Contains "`r`n" ([System.IO.File]::ReadAllText($ours)) 'the shim is written CRLF for cmd.exe'
 $bytes = [System.IO.File]::ReadAllBytes($ours)
 Assert-False ($bytes[0] -eq 0xEF) 'the shim has no BOM'
+Assert-Contains 'where /q pwsh.exe' ([System.IO.File]::ReadAllText($ours)) 'the shim locates pwsh rather than naming it'
+# Upgrading then uninstalling must not strand the old shim: the content test is
+# what decides whether uninstall may remove it.
+foreach ($legacy in $SSM_LAUNCHER_LEGACY_TEXT) {
+    [System.IO.File]::WriteAllText($ours, ($legacy -replace "`r?`n", "`r`n") + "`r`n")
+    Assert-True (Test-SsmOwnLauncher $ours) 'a shim from an earlier ssm is still recognised as ours'
+}
 [System.IO.File]::WriteAllText($ours, "@echo off`r`nsomething else`r`n")
 Assert-False (Test-SsmOwnLauncher $ours) 'a shim we did not write is left alone'
 Remove-Item $launcherDir -Recurse -Force -ErrorAction SilentlyContinue

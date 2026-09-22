@@ -78,16 +78,23 @@ and `cmd.exe` cannot run a PowerShell script directly.
 file, or operable program.`
 
 Installers up to **v1.2.3** added the PATH entry without telling Windows about
-it, so new terminals kept the environment Explorer had cached at sign-in. Run
-the installer once more — it repairs the PATH entry it already wrote, without
-reinstalling anything:
+it, so new terminals kept the environment Explorer had cached at sign-in.
 
-```powershell
-irm https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1 | iex
-```
+Either of these fixes it:
 
-Then open a new terminal. Signing out and back in fixes it too, and the Start
-Menu shortcut works either way because it points straight at the script.
+- **`ssm update`**, from the Start Menu shortcut. The shortcut works even when
+  the name does not, because it points straight at the script.
+- **Run the installer again**, which repairs the PATH entry and re-announces
+  it:
+
+  ```powershell
+  irm https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1 | iex
+  ```
+
+  Note that this installs the **latest** release. If you are pinned to an older
+  one and want to stay there, set `$env:SSM_INSTALL_VERSION` to your tag first.
+
+Then open a new terminal. Signing out and back in also works, and always did.
 
 If it still does not resolve, check what actually got installed:
 
