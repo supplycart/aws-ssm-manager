@@ -1,0 +1,141 @@
+name: Windows Install
+
+# Runs install.ps1 for real on a Windows runner, the way the docs say to:
+# `irm <url> | iex`, under both Windows PowerShell 5.1 and PowerShell 7. The
+# unit tests run on ubuntu under pwsh 7 only, which is how v1.2.x shipped an
+# installer that failed on every 5.1 machine -- 5.1 read the downloaded ssm.ps1
+# in the ANSI code page and rejected it as "not a valid script".
+#
+# Two modes:
+#   - pull requests: the PR's own install.ps1 and ssm.ps1, served from a local
+#     HTTP server. The CDN base is rewritten in a copy of install.ps1 only; the
+#     shipped file is never touched.
+#   - after a release (deploy.yml calls this with `version`): the real CDN,
+#     byte for byte what a user pastes.
+#
+# This is not the required `test` check (see test.yml for why that stays one
+# ubuntu job). Add "install (powershell)" and "install (pwsh)" to the master
+# ruleset to make it block merges.
+
+on:
+    pull_request:
+        branches:
+            - master
+        paths:
+            - install.ps1
+            - ssm.ps1
+            - .github/workflows/install-windows.yml
+    workflow_dispatch:
+        inputs:
+            version:
+                description: Released version to install from the CDN (vX.Y.Z or latest); empty tests this commit
+                type: string
+                default: ''
+    workflow_call:
+        inputs:
+            version:
+                type: string
+                required: true
+
+permissions:
+    contents: read
+
+jobs:
+    install:
+        name: install (${{ matrix.shell }})
+        runs-on: windows-latest
+        timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                # powershell = Windows PowerShell 5.1, what the Start Menu opens.
+                shell: [powershell, pwsh]
+        env:
+            SSM_TEST_VERSION: ${{ inputs.version }}
+            SSM_TEST_SHELL: ${{ matrix.shell }}
+        steps:
+            - name: Checkout
+              if: inputs.version == ''
+              uses: actions/checkout@v6
+
+            - name: Install
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $cdn = 'https://cdn.supplycart.my/shells/aws-ssm-manager'
+                  $server = $null
+
+                  if ($env:SSM_TEST_VERSION) {
+                    $url = "$cdn/install.ps1"
+                    if ($env:SSM_TEST_VERSION -cne 'latest') {
+                      $env:SSM_INSTALL_VERSION = $env:SSM_TEST_VERSION
+                    }
+                  } else {
+                    # Serve this commit's files in the CDN's layout.
+                    $root = Join-Path $env:RUNNER_TEMP 'cdn'
+                    New-Item -ItemType Directory -Path $root -Force | Out-Null
+                    $local = 'http://127.0.0.1:8765'
+                    $text = [IO.File]::ReadAllText((Resolve-Path install.ps1))
+                    if (([regex]::Matches($text, [regex]::Escape($cdn))).Count -ne 1) {
+                      throw "install.ps1 no longer names $cdn exactly once; update this workflow."
+                    }
+                    [IO.File]::WriteAllText((Join-Path $root 'install.ps1'), $text.Replace($cdn, $local))
+                    Copy-Item ssm.ps1 (Join-Path $root 'ssm.ps1')
+
+                    # text/plain, as the release uploads them: irm hands iex a
+                    # byte[] for octet-stream, which is Python's default here.
+                    $py = "import http.server as h; h.SimpleHTTPRequestHandler.extensions_map['.ps1'] = 'text/plain; charset=utf-8'; h.test(HandlerClass=h.SimpleHTTPRequestHandler, port=8765, bind='127.0.0.1')"
+                    $server = Start-Process python -ArgumentList '-c', "`"$py`"" -WorkingDirectory $root -PassThru -WindowStyle Hidden
+                    $up = $false
+                    foreach ($i in 1..30) {
+                      try { Invoke-WebRequest "$local/ssm.ps1" -Method Head -UseBasicParsing | Out-Null; $up = $true; break } catch { Start-Sleep 1 }
+                    }
+                    if (-not $up) { throw 'The local file server did not start.' }
+                    $url = "$local/install.ps1"
+                  }
+
+                  # The documented one-liner, run by the shell under test.
+                  Write-Host "::group::$env:SSM_TEST_SHELL -Command irm $url | iex"
+                  & $env:SSM_TEST_SHELL -NoProfile -ExecutionPolicy Bypass -Command "irm '$url' | iex"
+                  $code = $LASTEXITCODE
+                  Write-Host '::endgroup::'
+                  if ($server) { Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue }
+                  if ($code -ne 0) { throw "The installer exited $code." }
+
+            # The installer only warns when its own probe fails, so check the
+            # result independently rather than trusting its exit code.
+            - name: Verify
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $dir = Join-Path $env:USERPROFILE '.ssm'
+                  $shim = Join-Path $dir 'ssm.cmd'
+                  foreach ($f in 'ssm.ps1', 'ssm.cmd', 'config.json') {
+                    if (-not (Test-Path -LiteralPath (Join-Path $dir $f))) { throw "$f was not installed." }
+                  }
+
+                  $out = (& $shim version 2>&1) -join "`n"
+                  if ($LASTEXITCODE -ne 0) { throw "ssm version exited ${LASTEXITCODE}: $out" }
+                  Write-Host "ssm version -> $out"
+                  $want = $env:SSM_TEST_VERSION
+                  if (-not $want) { $want = 'dev' }
+                  if ($want -cne 'latest' -and $out -notmatch [regex]::Escape($want)) {
+                    throw "Expected $want, got: $out"
+                  }
+
+                  & $shim help | Out-Null
+                  if ($LASTEXITCODE -ne 0) { throw "ssm help exited $LASTEXITCODE." }
+
+                  $path = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+                  if (-not (($path -split ';') | Where-Object { $_.TrimEnd('\') -eq $dir })) {
+                    throw "$dir is not on the user PATH: $path"
+                  }
+                  $kind = (Get-Item 'HKCU:\Environment').GetValueKind('Path')
+                  if ($kind -ne 'ExpandString') { throw "User PATH was written as $kind, not ExpandString." }
+
+                  # A new process that picks the PATH up from the registry, the
+                  # way a fresh terminal would.
+                  $fresh = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::ExpandEnvironmentVariables($path)
+                  $out = cmd /c "set PATH=$fresh&& ssm version" 2>&1
+                  if ($LASTEXITCODE -ne 0) { throw "Bare 'ssm' did not resolve from the new PATH: $out" }
+                  Write-Host 'Installed and runnable.'

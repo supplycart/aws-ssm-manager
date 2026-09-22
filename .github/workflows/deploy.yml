@@ -33,6 +33,8 @@ jobs:
         environment: Production
         permissions:
             contents: write
+        outputs:
+            version: ${{ steps.version.outputs.version }}
         env:
             AWS_ACCESS_KEY_ID: ${{ vars.CLOUDFLARE_R2_CDN_ID }}
             AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_CDN_SECRET }}
@@ -190,3 +192,15 @@ jobs:
                   fi
                   gh release create "$VERSION" ssm.sh install.sh ssm.ps1 install.ps1 \
                     --verify-tag --title "$VERSION" --generate-notes
+
+    # Installs the release just uploaded, from the CDN, with the documented
+    # one-liner under Windows PowerShell 5.1 and 7. It runs after the upload,
+    # so it cannot stop a bad release -- the PR run of the same workflow is
+    # what does that -- but it does catch what only the CDN can break, such
+    # as a content type.
+    windows-install:
+        name: Windows install
+        needs: release
+        uses: ./.github/workflows/install-windows.yml
+        with:
+            version: ${{ needs.release.outputs.version }}
