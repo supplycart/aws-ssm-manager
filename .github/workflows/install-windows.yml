@@ -75,11 +75,14 @@ jobs:
                     $root = Join-Path $env:RUNNER_TEMP 'cdn'
                     New-Item -ItemType Directory -Path $root -Force | Out-Null
                     $local = 'http://127.0.0.1:8765'
+                    # Only the $base assignment; the header comments name the
+                    # CDN too, and leaving them alone keeps the diff to one line.
                     $text = [IO.File]::ReadAllText((Resolve-Path install.ps1))
-                    if (([regex]::Matches($text, [regex]::Escape($cdn))).Count -ne 1) {
-                      throw "install.ps1 no longer names $cdn exactly once; update this workflow."
+                    $assign = "`$base = '$cdn'"
+                    if (([regex]::Matches($text, [regex]::Escape($assign))).Count -ne 1) {
+                      throw "install.ps1 no longer has exactly one line $assign; update this workflow."
                     }
-                    [IO.File]::WriteAllText((Join-Path $root 'install.ps1'), $text.Replace($cdn, $local))
+                    [IO.File]::WriteAllText((Join-Path $root 'install.ps1'), $text.Replace($assign, "`$base = '$local'"))
                     Copy-Item ssm.ps1 (Join-Path $root 'ssm.ps1')
 
                     # text/plain, as the release uploads them: irm hands iex a
