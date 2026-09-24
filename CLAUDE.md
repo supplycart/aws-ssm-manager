@@ -31,6 +31,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `cd docs && pnpm install && pnpm dev` — docs site at `http://localhost:5173/shells/aws-ssm-manager/`;
   `pnpm format` before committing (CI runs `pnpm format:check` and `pnpm build`)
 
+## Tests are part of the change, not a follow-up
+
+**Every feature, flag and bug fix ships with a test in the same commit.** No exceptions, and not
+"tests to follow": the Windows build shipped four bugs that made every command fail, and each one
+would have been a three-line case in `test/commands_test.sh`.
+
+- **A new or changed command or flag** — add a case to `test/commands_test.sh`, which runs the
+  real command in both implementations. A flag that only parses is not a tested flag; assert what
+  the command *does* with it.
+- **A bug fix** — write the case first and watch it fail with the bug in place. A fix whose test
+  passes before the fix is testing the wrong thing.
+- **A helper with logic worth trusting** (PATH edits, port picking, version stamping) — a unit case
+  in `test/ssm_test.ps1` or the matching `test/*_test.sh` as well, where the edge cases are cheap.
+- **Anything about how the two implementations must agree** — `test/parity_test.sh`.
+- **Anything about installing, updating or uninstalling on Windows** — a step in
+  `.github/workflows/install-windows.yml`, which installs for real on a Windows runner. Bugs in
+  that area are invisible from macOS and were all found there, not by reading the code.
+
+New behaviour that no existing suite fits gets a new suite, wired into the required `test` job in
+`.github/workflows/test.yml` and listed under Commands above. Run the full suite before pushing —
+`bash test/commands_test.sh` needs `pwsh` on PATH or it quietly tests half of what you think.
+
 ## Two implementations
 
 `ssm.sh` (bash 3.2, macOS) and `ssm.ps1` (PowerShell 7, Windows 11) are two implementations of one
