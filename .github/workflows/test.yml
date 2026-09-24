@@ -47,6 +47,11 @@ jobs:
             - name: Unit tests
               run: bash test/args_test.sh && bash test/release_test.sh && bash test/install_test.sh && bash test/docs_upload_test.sh && bash test/parity_test.sh
 
+            # Runs the commands themselves, in both implementations, against
+            # stubbed aws/kubectl/fzf. Needs pwsh, which this image has.
+            - name: Command tests
+              run: bash test/commands_test.sh
+
             - name: PowerShell unit tests
               shell: pwsh
               run: ./test/ssm_test.ps1 && ./test/install_ps_test.ps1

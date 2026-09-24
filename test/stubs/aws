@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# A stand-in for the AWS CLI, so test/commands_test.sh can run whole commands
+# without an account. Prints what the real CLI would print for the queries in
+# ssm.sh, and records every call in $SSM_TEST_CALLS so a test can assert what
+# was asked for.
+set -u
+
+all="$*"
+
+if [[ -n "${SSM_TEST_CALLS:-}" ]]; then
+  echo "aws $all" >> "$SSM_TEST_CALLS"
+fi
+
+# A profile the tests did not set up: the real CLI fails, and both scripts have
+# to surface that rather than treating it as "no results".
+if [[ -n "${SSM_TEST_AWS_FAIL:-}" && "$all" == *"--profile $SSM_TEST_AWS_FAIL"* ]]; then
+  echo "An error occurred (AuthFailure) calling the operation" >&2
+  exit 255
+fi
+
+case "$1 $2" in
+  'ec2 describe-instances')
+    # list_apps filters on instance state only; list_instances adds a tag
+    # filter, and that is what tells the two calls apart.
+    if [[ "$all" == *'Name=tag:App'* ]]; then
+      app=$(printf '%s\n' "$all" | sed -n 's/.*Name=tag:App,Values=\([^ ]*\).*/\1/p')
+      case "$app" in
+        adam) printf 'i-0adam000000000001\tadam-web-1\n' ;;
+        beatrice)
+          printf 'i-0bea000000000001\tbea-web-1\n'
+          printf 'i-0bea000000000002\tbea-web-2\n'
+          ;;
+        # An app with instances but no RDS behind it.
+        charlie) printf 'i-0cha000000000001\tcha-web-1\n' ;;
+      esac
+    else
+      # One line, tab-separated, with a None in it: what --output text gives
+      # for several apps, and what has to be split into names.
+      printf 'adam\tbeatrice\tcharlie\tNone\n'
+    fi
+    ;;
+  'rds describe-db-instances')
+    app=$(printf '%s\n' "$all" | sed -n "s/.*Value=='\([^']*\)'.*/\1/p")
+    case "$app" in
+      adam) printf 'adam-db\tadam-db.rds.amazonaws.com\t5432\n' ;;
+      beatrice)
+        printf 'bea-db\tbea-db.rds.amazonaws.com\t5432\n'
+        printf 'bea-replica\tbea-replica.rds.amazonaws.com\t5432\n'
+        ;;
+    esac
+    ;;
+  # No ECS and no EKS in the fixture account: both are additive, and an empty
+  # answer is the shape a plain EC2 account gives.
+  'ecs list-clusters' | 'ecs list-services' | 'ecs describe-services' | \
+    'ecs list-container-instances' | 'ecs describe-tasks' | 'ecs list-tasks' | \
+    'resourcegroupstaggingapi get-resources' | 'eks list-clusters') ;;
+  'ssm start-session')
+    # The real one hands over an interactive session; the tests only need to
+    # know it was reached, and with which target.
+    target=$(printf '%s\n' "$all" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
+    echo "STUB session to $target"
+    ;;
+  'configure set')
+    printf '%s\n' "$all" >> "$HOME/.aws-stub-writes"
+    ;;
+  'configure get')
+    # Nothing is configured unless a `configure set` in this test wrote it.
+    key="$3"
+    profile=$(printf '%s\n' "$all" | sed -n 's/.*--profile \([^ ]*\).*/\1/p')
+    if [[ -f "$HOME/.aws-stub-writes" ]] &&
+      grep -q "set $key .* --profile $profile" "$HOME/.aws-stub-writes"; then
+      grep "set $key .* --profile $profile" "$HOME/.aws-stub-writes" |
+        tail -1 | sed "s/.*set $key \(.*\) --profile.*/\1/"
+    else
+      exit 1
+    fi
+    ;;
+  *) ;;
+esac
+exit 0

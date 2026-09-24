@@ -172,9 +172,19 @@ function Get-SsmConfigValue {
 function Get-SsmAccountList {
     # jq 'keys[]' sorts by codepoint; Sort-Object is culture-aware by default,
     # which would order the menu differently from macOS.
-    $names = @((Get-SsmConfig).PSObject.Properties.Name)
-    return [string[]]([System.Linq.Enumerable]::OrderBy(
-            [string[]]$names, [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal))
+    # One property at a time, never .Properties.Name: PowerShell's member
+    # enumeration throws under StrictMode when the collection is empty, and an
+    # empty config.json -- what install.ps1 writes -- is exactly that. It made
+    # every account command fail on a fresh install with "The property 'Name'
+    # cannot be found on this object."
+    $names = [string[]]@(foreach ($p in (Get-SsmConfig).PSObject.Properties) { $p.Name })
+    # The leading comma, as everywhere else that returns an array: without it
+    # a one-account config comes back as a bare string, and the caller's
+    # .Count then throws "The property 'Count' cannot be found on this
+    # object." -- which is every ssh, db and pod on a machine with exactly one
+    # account, the state `ssm config add` leaves behind.
+    return , ([string[]]([System.Linq.Enumerable]::OrderBy(
+                [string[]]$names, [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal)))
 }
 
 # ---------------------------------------------------------------------------
@@ -1076,7 +1086,12 @@ function Select-SsmApp {
     param([string]$Wanted, [string]$Account, [string]$Profile, [string]$Region)
     Write-SsmErr 'Fetching apps...'
 
-    $all = @(Get-SsmApps $Profile $Region) + @(Get-SsmEcsApps)
+    # No @() around either call. Both return `, ([string[]]...)` so that a
+    # one-item result survives, and @() around that gives an array holding the
+    # array -- which the [string[]] cast below then flattens into a single
+    # "adam beatrice charlie" item, so --app never matched and the menu drew
+    # one unusable row. Parentheses unroll the wrapper; + concatenates.
+    $all = [string[]]@((Get-SsmApps $Profile $Region) + (Get-SsmEcsApps))
     $apps = [string[]]([System.Linq.Enumerable]::OrderBy(
             [string[]]@($all | Where-Object { $_ -and $_ -cne 'None' } | Sort-Object -Unique),
             [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal))
@@ -1848,7 +1863,9 @@ function Edit-SsmAccount {
         }
         'database-port' {
             $dbs = Get-SsmMember (Get-SsmMember (Get-SsmConfig) $account) 'databases'
-            $names = if ($dbs) { [string[]]@($dbs.PSObject.Properties.Name) } else { [string[]]@() }
+            # Property by property, for the reason in Get-SsmAccountList: an
+            # account whose "db" object is {} would otherwise throw here.
+            $names = [string[]]@(foreach ($p in $dbs.PSObject.Properties) { $p.Name })
             if ($names.Count -eq 0) {
                 Write-SsmErr "No port assignments for '$account' yet. 'ssm db' creates one on first use."
                 return $false
@@ -1895,17 +1912,24 @@ function Invoke-SsmConfig {
 
     # The action is a verb, so it reads as a subcommand rather than a flag value.
     $action = ''
-    # Not $args: that is an automatic variable.
-    $rest = @($Rest)
-    if ($rest.Count -gt 0) {
-        switch -CaseSensitive ($rest[0]) {
+    # $words, not $rest or $args: variable names are case-insensitive, so a
+    # local $rest IS the $Rest parameter and clearing it throws every argument
+    # away, and $args is automatic. And not @($Rest) either: a command called
+    # with no arguments binds $Rest to $null, which @() turns into a
+    # one-element array holding $null -- an empty string by the time the parser
+    # sees it, which it rejects as "Unknown option ''". That is what bare
+    # `ssm config` did.
+    $words = [string[]]@()
+    if ($null -ne $Rest) { $words = [string[]]@($Rest) }
+    if ($words.Count -gt 0) {
+        switch -CaseSensitive ($words[0]) {
             { $_ -ceq 'view' -or $_ -ceq 'add' -or $_ -ceq 'edit' -or $_ -ceq 'delete' } {
-                $action = $rest[0]
-                $rest = @($rest | Select-Object -Skip 1)
+                $action = $words[0]
+                $words = [string[]]@($words | Select-Object -Skip 1)
             }
             default {
-                if ($rest[0] -and -not ($rest[0] -clike '-*')) {
-                    Write-SsmErr "Error: unknown config action '$($rest[0])'."
+                if ($words[0] -and -not ($words[0] -clike '-*')) {
+                    Write-SsmErr "Error: unknown config action '$($words[0])'."
                     Write-SsmErr ''
                     Get-SsmUsage 'config' | ForEach-Object { Write-SsmErr $_ }
                     Exit-Ssm 1
@@ -1914,7 +1938,7 @@ function Invoke-SsmConfig {
         }
     }
 
-    if (-not (Read-SsmCommandArgs 'config' $rest)) { Exit-Ssm 1 }
+    if (-not (Read-SsmCommandArgs 'config' $words)) { Exit-Ssm 1 }
 
     if (-not $action) {
         $action = Invoke-SsmMenu 'Config action:' @('view', 'add', 'edit', 'delete')

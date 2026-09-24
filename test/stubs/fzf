@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Stands in for fzf in both implementations, so the menu paths are testable.
+# SSM_TEST_PICK picks a row by 1-based index; unset means "cancel", which fzf
+# reports as exit 130 and both scripts read as "the user pressed Escape".
+set -u
+[[ -n "${SSM_TEST_CALLS:-}" ]] && echo "fzf $*" >> "$SSM_TEST_CALLS"
+rows=$(cat)
+if [[ -z "${SSM_TEST_PICK:-}" ]]; then exit 130; fi
+printf '%s\n' "$rows" | sed -n "${SSM_TEST_PICK}p"
