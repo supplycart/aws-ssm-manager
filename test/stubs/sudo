@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Never actually elevates: `ssm db` edits /etc/hosts on macOS, and a test must
+# not. Records the call and succeeds.
+set -u
+[[ -n "${SSM_TEST_CALLS:-}" ]] && echo "sudo $*" >> "$SSM_TEST_CALLS"
+exit 0

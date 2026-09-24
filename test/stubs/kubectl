@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -u
+[[ -n "${SSM_TEST_CALLS:-}" ]] && echo "kubectl $*" >> "$SSM_TEST_CALLS"
+echo '{"items":[]}'
+exit 0
