@@ -9,7 +9,7 @@ HOSTS_FILE="${SSM_HOSTS_FILE:-/etc/hosts}"
 TUNNEL_DIR="$HOME/.ssm/tunnels"
 # The release workflow rewrites this line to the release tag (stamp_version in
 # .github/scripts/release.sh), so it must stay exactly SSM_VERSION="dev" here.
-SSM_VERSION="dev"
+SSM_VERSION="v1.2.7"
 # Set by the dispatch block at the bottom. Only used to name the command in
 # error and usage messages.
 COMMAND=""
