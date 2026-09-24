@@ -340,10 +340,12 @@ function Resolve-SsmSelection {
 
     if (-not $Wanted) {
         if ($Rows.Count -eq 1 -and $Auto -eq 'auto') {
-            Write-SsmErr "Auto-selecting: $($Rows[0])"
+            Write-SsmChoice $Label "$($Rows[0]) (only one)"
             return $Rows[0]
         }
-        return Invoke-SsmMenu $Prompt $Rows
+        $picked = Invoke-SsmMenu $Prompt $Rows
+        if ($picked) { Write-SsmChoice $Label $picked }
+        return $picked
     }
 
     $matched = [System.Collections.Generic.List[string]]::new()
@@ -358,7 +360,10 @@ function Resolve-SsmSelection {
         }
     }
 
-    if ($matched.Count -eq 1) { return $matched[0] }
+    if ($matched.Count -eq 1) {
+        Write-SsmChoice $Label $matched[0]
+        return $matched[0]
+    }
 
     if ($matched.Count -eq 0) {
         Write-SsmErr "Error: no $Label '$Wanted' in $Context."
@@ -429,6 +434,17 @@ function Select-SsmPickerView {
             }))
 }
 
+# What Enter means with a filter typed: the first match, or -- with -AllowNew
+# and nothing matching -- the typed text as a new entry. Pure, so the tests can
+# pin it without a console.
+function Select-SsmPickerChoice {
+    param([string[]]$Items, [string]$Filter, [switch]$AllowNew)
+    $view = Select-SsmPickerView -Items $Items -Filter $Filter
+    if ($view.Count) { return $view[0] }
+    if ($AllowNew -and $Filter) { return $Filter }
+    return $null
+}
+
 function Clear-SsmDrawnLines {
     param([int]$Count)
     if ($Count -le 0) { return }
@@ -448,11 +464,18 @@ function Clear-SsmDrawnLines {
 # erase exactly those. Everything here goes to the host, never to the success
 # stream: the caller is capturing the return value.
 function Write-SsmPickerFrame {
-    param([string]$Prompt, [string]$Filter, [string[]]$View, [int]$Cursor, [int]$Top, [int]$Rows)
+    param([string]$Prompt, [string]$Filter, [string[]]$View, [int]$Cursor, [int]$Top, [int]$Rows,
+        [string]$Header = '', [switch]$AllowNew)
+    $drawn = 0
+    if ($Header) { Write-Host "  $Header" -ForegroundColor DarkGray; $drawn++ }
     Write-Host "$Prompt $Filter"
-    $drawn = 1
+    $drawn++
     if ($View.Count -eq 0) {
-        Write-Host '  (no matches)'
+        if ($AllowNew -and $Filter) {
+            Write-Host "> $Filter (new -- press Enter to create it)" -ForegroundColor Green
+        } else {
+            Write-Host '  (no matches)'
+        }
         return $drawn + 1
     }
     $last = [Math]::Min($Top + $Rows, $View.Count)
@@ -483,10 +506,28 @@ function Show-SsmNumberedPrompt {
     return $Items[$n - 1]
 }
 
+# -AllowNew is the console picker's --print-query: Enter on a filter that
+# matches nothing returns the filter text itself, which is how a new profile
+# name is typed in.
 function Show-SsmConsolePicker {
-    param([string]$Prompt, [string[]]$Items)
+    param([string]$Prompt, [string[]]$Items, [string]$Header = '', [switch]$AllowNew)
 
-    if ([Console]::IsInputRedirected) { return Show-SsmNumberedPrompt $Prompt $Items }
+    if ([Console]::IsInputRedirected) {
+        if ($Header) { Write-SsmErr $Header }
+        if ($AllowNew) {
+            if ($Items.Count) { for ($i = 0; $i -lt $Items.Count; $i++) { Write-SsmErr ("{0,3}) {1}" -f ($i + 1), $Items[$i]) } }
+            Write-SsmErr "$Prompt [number, or a new name]: "
+            $answer = [Console]::In.ReadLine()
+            if (-not $answer) { return $null }
+            $n = 0
+            if ([int]::TryParse($answer.Trim(), [ref]$n) -and $n -ge 1 -and $n -le $Items.Count) { return $Items[$n - 1] }
+            # A typed name is taken whole here -- there is no live filter to
+            # show what a partial one would match.
+            foreach ($item in $Items) { if (($item -split "`t")[0] -ceq $answer.Trim()) { return $item } }
+            return $answer.Trim()
+        }
+        return Show-SsmNumberedPrompt $Prompt $Items
+    }
 
     $filter = ''
     $cursor = 0
@@ -507,13 +548,16 @@ function Show-SsmConsolePicker {
             if ($cursor -ge $top + $rows) { $top = $cursor - $rows + 1 }
 
             Clear-SsmDrawnLines $drawn
-            $drawn = Write-SsmPickerFrame $Prompt $filter $view $cursor $top $rows
+            $drawn = Write-SsmPickerFrame $Prompt $filter $view $cursor $top $rows -Header $Header -AllowNew:$AllowNew
 
             $k = [Console]::ReadKey($true)
             if (($k.Modifiers -band [ConsoleModifiers]::Control) -and $k.Key -eq 'C') { return $null }
             switch ($k.Key) {
                 'Escape' { return $null }
-                'Enter' { if ($view.Count) { return $view[$cursor] } else { return $null } }
+                'Enter' {
+                    if ($view.Count) { return $view[$cursor] }
+                    return (Select-SsmPickerChoice -Items $Items -Filter $filter -AllowNew:$AllowNew)
+                }
                 'UpArrow' { if ($cursor -gt 0) { $cursor-- } }
                 'DownArrow' { if ($cursor -lt $view.Count - 1) { $cursor++ } }
                 'PageUp' { $cursor = [Math]::Max(0, $cursor - $rows) }
@@ -538,18 +582,33 @@ function Show-SsmConsolePicker {
     }
 }
 
-# bash: select_menu (ssm.sh:36)
+# bash: select_menu (ssm.sh:42), and select_menu_header when -Header is given
 function Invoke-SsmMenu {
-    param([string]$Prompt, [string[]]$Items)
+    param([string]$Prompt, [string[]]$Items, [string]$Header = '')
     if (-not $Items -or $Items.Count -eq 0) { return $null }
 
     if (Test-SsmFzf) {
-        $out = $Items | & $script:SsmFzfCommand --prompt="$Prompt " --height=~10 --layout=reverse --border
+        if ($Header) {
+            $out = $Items | & $script:SsmFzfCommand --prompt="$Prompt " --header="$Header" --height=~15 --layout=reverse --border
+        } else {
+            $out = $Items | & $script:SsmFzfCommand --prompt="$Prompt " --height=~10 --layout=reverse --border
+        }
         # 130 is a cancelled menu, not a failure.
         if ($LASTEXITCODE -ne 0) { return $null }
         return $out
     }
-    return Show-SsmConsolePicker -Prompt $Prompt -Items $Items
+    return Show-SsmConsolePicker -Prompt $Prompt -Items $Items -Header $Header
+}
+
+# bash: print_choice (ssm.sh:75)
+#
+# fzf clears its menu once you pick, so without this nothing on screen says
+# what was chosen. Tabs in a menu row become spaces here.
+function Write-SsmChoice {
+    param([string]$Label, [string]$Value)
+    $mark = if ([Console]::OutputEncoding.CodePage -eq 65001) { '✓' } else { '*' }
+    $Label = $Label.Substring(0, 1).ToUpperInvariant() + $Label.Substring(1)
+    Write-SsmErr "$C_BOLD$C_GREEN$mark ${Label}:$C_RESET $($Value -replace "`t", ' ')"
 }
 
 # bash: select_multi (ssm.sh:60)
@@ -1078,7 +1137,217 @@ function Select-SsmAccount {
         Write-SsmErr "No accounts found in $script:CONFIG_FILE"
         return $null
     }
-    return Resolve-SsmSelection $Wanted 'account' $script:CONFIG_FILE 'Select account:' '1' '' $accounts
+    # Each row carries the account's masked access key; matching is on the
+    # name alone (field 1), and only the name is returned.
+    $table = Get-SsmAwsProfileKeys
+    $rows = [string[]]@(foreach ($a in $accounts) {
+            "$a`t" + (Get-SsmKeyHint $table (Get-SsmConfigValue $a 'profile'))
+        })
+    $selected = Resolve-SsmSelection $Wanted 'account' $script:CONFIG_FILE 'Select account:' '1' '' $rows
+    if ($null -eq $selected) { return $null }
+    return ($selected -split "`t")[0]
+}
+
+# ---------------------------------------------------------------------------
+# AWS CLI profiles and regions, for `ssm config add` and `ssm config edit`.
+# ---------------------------------------------------------------------------
+
+# bash: aws_profile_keys (ssm.sh:833)
+#
+# "profile<TAB>access-key-id" for every profile in the AWS CLI's shared files,
+# key empty for a profile without one. Read directly, not through
+# `aws configure get` per profile, which would make every account menu slow.
+function Get-SsmAwsProfileKeys {
+    $cred = if ($env:AWS_SHARED_CREDENTIALS_FILE) { $env:AWS_SHARED_CREDENTIALS_FILE } else { Join-Path $HOME '.aws/credentials' }
+    $conf = if ($env:AWS_CONFIG_FILE) { $env:AWS_CONFIG_FILE } else { Join-Path $HOME '.aws/config' }
+    $order = [System.Collections.Generic.List[string]]::new()
+    $keys = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
+    foreach ($file in @($cred, $conf)) {
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $isCred = ($file -ceq $cred)
+        $cur = ''
+        foreach ($line in [System.IO.File]::ReadAllLines($file)) {
+            if ($line -match '^\s*\[(.*)\]\s*$') {
+                $s = $Matches[1].Trim()
+                # ~/.aws/config names a profile "[profile x]", except
+                # "[default]"; [sso-session x] and the like are not profiles.
+                if (-not $isCred -and $s -cne 'default') {
+                    if ($s -cmatch '^profile\s+(.+)$') { $s = $Matches[1] } else { $cur = ''; continue }
+                }
+                $cur = $s
+                if (-not $keys.ContainsKey($cur)) { $keys[$cur] = ''; $order.Add($cur) }
+                continue
+            }
+            if ($cur -and $line -match '^\s*aws_access_key_id\s*=(.*)$') {
+                # The credentials file wins, as it does for the CLI.
+                if ($isCred -or -not $keys[$cur]) { $keys[$cur] = $Matches[1].Trim() }
+            }
+        }
+    }
+    $sorted = [string[]]([System.Linq.Enumerable]::OrderBy(
+            [string[]]$order.ToArray(), [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal))
+    return , ([string[]]@(foreach ($p in $sorted) { "$p`t$($keys[$p])" }))
+}
+
+# bash: key_hint_for (ssm.sh:866) -- "(AKIA****WXYZ)"
+function Get-SsmKeyHint {
+    param([string[]]$Table, [string]$Profile)
+    if ($Profile) {
+        foreach ($row in $Table) {
+            $c = $row -split "`t", 2
+            if ($c[0] -ceq $Profile) {
+                $key = if ($c.Count -gt 1) { $c[1] } else { '' }
+                if (-not $key) { return '(no access key)' }
+                if ($key.Length -lt 8) { return '(****)' }
+                return '(' + $key.Substring(0, 4) + '****' + $key.Substring($key.Length - 4) + ')'
+            }
+        }
+    }
+    return '(no such AWS profile)'
+}
+
+# bash: aws_profile_exists (ssm.sh:877)
+function Test-SsmAwsProfileExists {
+    param([string]$Profile)
+    foreach ($row in (Get-SsmAwsProfileKeys)) {
+        if (($row -split "`t")[0] -ceq $Profile) { return $true }
+    }
+    return $false
+}
+
+# bash: validate_profile_name (ssm.sh:883)
+function Test-SsmProfileName {
+    param([string]$Profile)
+    if ($Profile -cmatch '^[A-Za-z0-9][A-Za-z0-9._@+-]*$') { return $true }
+    if (Test-SsmAwsProfileExists $Profile) { return $true }
+    Write-SsmErr "Error: '$Profile' is not a valid AWS CLI profile name."
+    Write-SsmErr 'Use letters, digits and . _ - @ +, starting with a letter or digit.'
+    return $false
+}
+
+$PROFILE_HELP = 'An AWS CLI profile is a named set of keys saved in ~/.aws. Pick one, or type a new name and press Enter to create it.'
+
+# bash: pick_profile (ssm.sh:897)
+#
+# The existing profiles plus whatever you type: a name matching nothing is a
+# new profile. fzf reports that as exit 1 with the query on its first line;
+# the console picker does the same through -AllowNew.
+function Select-SsmProfile {
+    param([string]$Wanted)
+    if ($Wanted) {
+        if (-not (Test-SsmProfileName $Wanted)) { return $null }
+        return $Wanted
+    }
+
+    $table = Get-SsmAwsProfileKeys
+    $rows = [string[]]@(foreach ($row in $table) {
+            $name = ($row -split "`t")[0]
+            "$name`t" + (Get-SsmKeyHint $table $name)
+        })
+
+    $picked = $null
+    $isNew = $false
+    if (Test-SsmFzf) {
+        $out = @($rows | & $script:SsmFzfCommand --print-query --prompt="AWS CLI profile: " `
+                --header="$PROFILE_HELP" --height=~15 --layout=reverse --border)
+        $rc = $LASTEXITCODE
+        $query = if ($out.Count -ge 1) { [string]$out[0] } else { '' }
+        if ($rc -eq 0 -and $out.Count -ge 2 -and $out[1]) {
+            $picked = [string]$out[1]
+        } elseif ($rc -eq 1 -and $query) {
+            $picked = $query; $isNew = $true
+        } else {
+            return $null
+        }
+    } else {
+        $picked = Show-SsmConsolePicker -Prompt 'AWS CLI profile:' -Items $rows -Header $PROFILE_HELP -AllowNew
+        if (-not $picked) { return $null }
+        $isNew = -not $picked.Contains("`t")
+    }
+
+    if ($isNew) {
+        if (-not (Test-SsmProfileName $picked)) { return $null }
+        Write-SsmChoice 'profile' "$picked (new)"
+        return $picked
+    }
+    Write-SsmChoice 'profile' $picked
+    return ($picked -split "`t")[0]
+}
+
+# The region list behind the picker, fetched when it opens. Public and needs no
+# AWS credentials. Must match SSM_REGIONS_URL in ssm.sh; test/parity_test.sh
+# checks. The env override is for test/commands_test.sh.
+$SSM_REGIONS_URL = if ($env:SSM_REGIONS_URL) { $env:SSM_REGIONS_URL } else { 'https://xcrone.github.io/aws-regions/data.json' }
+
+# bash: fetch_regions (ssm.sh:946)
+#
+# "code<TAB>name" per region that is open and has a code yet; an empty array
+# when the list cannot be fetched.
+function Get-SsmRegionRows {
+    try {
+        $data = Invoke-RestMethod -Uri $script:SSM_REGIONS_URL -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        return , ([string[]]@())
+    }
+    $regions = Get-SsmMember $data 'regions'
+    if ($null -eq $regions) { return , ([string[]]@()) }
+    return , ([string[]]@(foreach ($r in $regions) {
+                $code = [string](Get-SsmMember $r 'code')
+                if ((Get-SsmMember $r 'available') -eq $true -and $code) {
+                    "$code`t$([string](Get-SsmMember $r 'name'))"
+                }
+            }))
+}
+
+# bash: validate_region (ssm.sh:955)
+function Test-SsmRegion {
+    param([string]$Region)
+    if ($Region -cmatch '^[a-z]{2,}(-[a-z]+)+-[0-9]+$') { return $true }
+    Write-SsmErr "Error: '$Region' is not an AWS region code, like ap-southeast-1."
+    Write-SsmErr 'Leave out --region to pick one from a list.'
+    return $false
+}
+
+# bash: pick_region (ssm.sh:965)
+function Select-SsmRegion {
+    param([string]$Wanted, [string]$Current = '')
+    if ($Wanted) {
+        if (-not (Test-SsmRegion $Wanted)) { return $null }
+        return $Wanted
+    }
+    Write-SsmErr 'Fetching AWS regions...'
+    $rows = Get-SsmRegionRows
+
+    # Offline, or the list moved: asking for the code beats refusing to add.
+    if ($rows.Count -eq 0) {
+        Write-SsmErr "Could not fetch the region list from $script:SSM_REGIONS_URL."
+        $typed = Read-SsmLine 'AWS region code (e.g. ap-southeast-1): '
+        if (-not $typed) { return $null }
+        if (-not (Test-SsmRegion $typed)) { return $null }
+        return $typed
+    }
+
+    $header = 'Type to filter by code or city, e.g. singapore.'
+    if ($Current) { $header = "Currently $Current. $header" }
+    $picked = Invoke-SsmMenu 'AWS region:' $rows -Header $header
+    if (-not $picked) { return $null }
+    Write-SsmChoice 'region' $picked
+    return ($picked -split "`t")[0]
+}
+
+# bash: profile_create_prompt (ssm.sh:996)
+function Invoke-SsmProfileCreate {
+    param([string]$Profile, [string]$Region)
+    Write-Host "Creating AWS CLI profile '$Profile'. Paste the access key pair from the AWS console (IAM > Security credentials)."
+    $key = $script:ARG_ACCESS_KEY
+    if (-not $key) { $key = Read-SsmLine 'Access Key ID: ' }
+    if (-not $key) { Write-SsmErr 'Aborted: no access key given.'; return $false }
+    $secret = Read-SsmSecretValue $script:ARG_SECRET_KEY
+    if ($null -eq $secret) { return $false }
+    if (-not $secret) { Write-SsmErr 'Aborted: no secret key given.'; return $false }
+    Set-SsmAwsProfile $Profile $key $secret $Region
+    Write-Host "AWS CLI profile '$Profile' configured."
+    return $true
 }
 
 # bash: pick_app (ssm.sh:666)
@@ -1126,16 +1395,20 @@ function Select-SsmInstance {
 # bash: ssh_pick_target (ssm.sh:707)
 # The "Connect to:" menu, or the flags that stand in for it.
 function Select-SsmSshTarget {
-    if ($script:ARG_TYPE -ceq 'ec2' -or $script:ARG_INSTANCE) { return 'EC2 instance' }
-    if ($script:ARG_TYPE -ceq 'ecs' -or $script:ARG_CONTAINER -or $script:ARG_TASK) { return 'ECS task' }
-    return Invoke-SsmMenu 'Connect to:' @('EC2 instance', 'ECS task')
+    if ($script:ARG_TYPE -ceq 'ec2' -or $script:ARG_INSTANCE) { $target = 'EC2 instance' }
+    elseif ($script:ARG_TYPE -ceq 'ecs' -or $script:ARG_CONTAINER -or $script:ARG_TASK) { $target = 'ECS task' }
+    else { $target = Invoke-SsmMenu 'Connect to:' @('EC2 instance', 'ECS task') }
+    if ($target) { Write-SsmChoice 'target' $target }
+    return $target
 }
 
 # bash: ssh_pick_shell (ssm.sh:718)
 function Select-SsmSshShell {
-    if ($script:ARG_HOST) { return 'Host shell' }
-    if ($script:ARG_CONTAINER -or $script:ARG_TASK) { return 'Container shell (ECS Exec)' }
-    return Invoke-SsmMenu 'Open which shell?' @('Host shell', 'Container shell (ECS Exec)')
+    if ($script:ARG_HOST) { $shell = 'Host shell' }
+    elseif ($script:ARG_CONTAINER -or $script:ARG_TASK) { $shell = 'Container shell (ECS Exec)' }
+    else { $shell = Invoke-SsmMenu 'Open which shell?' @('Host shell', 'Container shell (ECS Exec)') }
+    if ($shell) { Write-SsmChoice 'shell' $shell }
+    return $shell
 }
 
 # ---------------------------------------------------------------------------
@@ -1669,7 +1942,7 @@ function Show-SsmConfig {
 # bash: config_add (ssm.sh:1226)
 function Add-SsmAccount {
     $name = $script:ARG_ENV
-    if (-not $name) { $name = Read-SsmLine 'Account name: ' }
+    if (-not $name) { $name = Read-SsmLine 'Account name (your label for this AWS account in ssm, e.g. staging): ' }
     if (-not $name) { Write-SsmErr 'Aborted.'; return $false }
 
     # Adding over an existing account used to replace it silently, taking its db
@@ -1683,10 +1956,23 @@ function Add-SsmAccount {
         Write-Host "Replacing existing account '$name'."
     }
 
-    $profile = $script:ARG_PROFILE
-    if (-not $profile) { $profile = Read-SsmLine 'AWS profile: ' }
-    $region = $script:ARG_REGION
-    if (-not $region) { $region = Read-SsmLine 'AWS region: ' }
+    $profile = Select-SsmProfile $script:ARG_PROFILE
+    if (-not $profile) { Write-SsmErr 'Aborted.'; return $false }
+    $region = Select-SsmRegion $script:ARG_REGION
+    if (-not $region) { Write-SsmErr 'Aborted.'; return $false }
+
+    # The AWS CLI profile is settled before the account is written, so backing
+    # out of the key prompts leaves nothing half-added.
+    $credsGiven = [bool]($script:ARG_ACCESS_KEY -or $script:ARG_SECRET_KEY -or $env:SSM_AWS_SECRET_KEY)
+    if ($script:ARG_SKIP_CREDENTIALS) {
+        if (-not (Test-SsmAwsProfileExists $profile)) {
+            Write-SsmErr "Warning: AWS CLI profile '$profile' does not exist yet; ssm cannot reach AWS until it is set up."
+        }
+    } elseif ((Test-SsmAwsProfileExists $profile) -and -not $credsGiven) {
+        Write-Host "Using existing AWS CLI profile '$profile' $(Get-SsmKeyHint (Get-SsmAwsProfileKeys) $profile)."
+    } else {
+        if (-not (Invoke-SsmProfileCreate $profile $region)) { return $false }
+    }
 
     $config = Get-SsmConfig
     $config | Add-Member -NotePropertyName $name -NotePropertyValue ([pscustomobject]@{
@@ -1696,28 +1982,6 @@ function Add-SsmAccount {
         }) -Force
     Save-SsmConfig $config
     Write-Host "Account '$name' added."
-
-    if ($script:ARG_SKIP_CREDENTIALS) { return $true }
-
-    # Credentials supplied on the command line mean there is nothing to ask.
-    if ($script:ARG_ACCESS_KEY -or $script:ARG_SECRET_KEY -or $env:SSM_AWS_SECRET_KEY) {
-        $key = $script:ARG_ACCESS_KEY
-        if (-not $key) { $key = Read-SsmLine 'Access Key ID: ' }
-        $secret = Read-SsmSecretValue $script:ARG_SECRET_KEY
-        if ($null -eq $secret) { return $false }
-        Set-SsmAwsProfile $profile $key $secret $region
-        Write-Host "AWS CLI profile '$profile' configured."
-        return $true
-    }
-
-    $setup = Read-SsmLine "Set up AWS CLI credentials for profile '$profile'? [y/N]: "
-    if (Test-SsmYes $setup) {
-        $key = Read-SsmLine 'Access Key ID: '
-        $secret = Read-SsmSecretValue ''
-        if ($null -eq $secret) { return $false }
-        Set-SsmAwsProfile $profile $key $secret $region
-        Write-Host "AWS CLI profile '$profile' configured."
-    }
     return $true
 }
 
@@ -1822,6 +2086,9 @@ function Edit-SsmAccount {
             if (-not (Rename-SsmAccount $account $script:ARG_NAME)) { return $false }
             $account = $script:ARG_NAME
         }
+        # Both are checked before anything is written, so a bad value changes nothing.
+        if ($script:ARG_PROFILE -and -not (Test-SsmProfileName $script:ARG_PROFILE)) { return $false }
+        if ($script:ARG_REGION -and -not (Test-SsmRegion $script:ARG_REGION)) { return $false }
         if ($script:ARG_PROFILE) {
             if (-not (Set-SsmConfigField $account 'profile' $script:ARG_PROFILE)) { return $false }
             # Credential edits below belong to the profile we just moved to.
@@ -1879,11 +2146,18 @@ function Edit-SsmAccount {
             if ($value -ceq 'none') { return (Remove-SsmDbPort $account $db) }
             return (Set-SsmDbPort $account $db $value)
         }
-        { $_ -ceq 'profile' -or $_ -ceq 'region' } {
-            $current = Get-SsmConfigValue $account $field
-            $value = Read-SsmLine "$field [$current]: "
-            if (-not $value) { $value = $current }
-            return (Set-SsmConfigField $account $field $value)
+        'profile' {
+            $value = Select-SsmProfile ''
+            if (-not $value) { return $false }
+            if (-not (Test-SsmAwsProfileExists $value)) {
+                if (-not (Invoke-SsmProfileCreate $value (Get-SsmConfigValue $account 'region'))) { return $false }
+            }
+            return (Set-SsmConfigField $account 'profile' $value)
+        }
+        'region' {
+            $value = Select-SsmRegion '' (Get-SsmConfigValue $account 'region')
+            if (-not $value) { return $false }
+            return (Set-SsmConfigField $account 'region' $value)
         }
         'aws-access-key' {
             $current = Get-SsmAwsConfigValue $profile 'aws_access_key_id'

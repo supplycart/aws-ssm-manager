@@ -11,16 +11,22 @@ ssm keeps its accounts in `~/.ssm/config.json`. Add the first one with
 
 ```sh
 ssm config
-# → add → enter account name, AWS profile name, region
-# → prompted to set AWS access key ID and secret
+# → add → account name, then pick (or type) an AWS CLI profile, then a region
+# → a new profile asks for its access key ID and secret
 ```
 
 `add` asks for:
 
-- Account name: the key in `~/.ssm/config.json`, and what you pass as `--env`
-- AWS CLI profile name
-- AWS region
-- Access key ID and secret access key (optional, and skippable)
+- **Account name**: your label for the AWS account, such as `staging`. It is
+  the key in `~/.ssm/config.json`, and what you pass as `--env`.
+- **AWS CLI profile**: the saved access keys in `~/.aws` that ssm calls AWS
+  with. Pick one you already have, or type a new name to create it.
+- **AWS region**: pick it from a list. Type a city, such as `singapore`, to
+  filter it.
+
+An account and a profile are separate things. The account is ssm's name for
+where you connect; the profile is the credentials it connects with. Several
+accounts can share one profile.
 
 The `databases` section of the config is filled in automatically the first time
 you use `ssm db`.

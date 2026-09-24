@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Never actually elevates: `ssm db` edits /etc/hosts on macOS, and a test must
-# not. Records the call and succeeds.
+# not. Records the call and succeeds without running anything -- unless
+# SSM_TEST_SUDO_EXEC=1, which runs the command as the current user. The hosts
+# tests set that, together with SSM_HOSTS_FILE pointing at a scratch file, so
+# the edits ssm makes can be checked byte for byte.
 set -u
 [[ -n "${SSM_TEST_CALLS:-}" ]] && echo "sudo $*" >> "$SSM_TEST_CALLS"
+if [[ "${SSM_TEST_SUDO_EXEC:-}" == 1 ]]; then
+  exec "$@"
+fi
 exit 0

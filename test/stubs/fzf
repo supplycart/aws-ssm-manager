@@ -2,8 +2,35 @@
 # Stands in for fzf in both implementations, so the menu paths are testable.
 # SSM_TEST_PICK picks a row by 1-based index; unset means "cancel", which fzf
 # reports as exit 130 and both scripts read as "the user pressed Escape".
+#
+# With --print-query, SSM_TEST_QUERY is what the user "typed". It is printed
+# first, as fzf does; with no SSM_TEST_PICK it matched nothing, which fzf
+# reports as exit 1.
+#
+# SSM_TEST_MENU_LOG, when set, collects every row offered, so a test can check
+# what a menu showed.
 set -u
 [[ -n "${SSM_TEST_CALLS:-}" ]] && echo "fzf $*" >> "$SSM_TEST_CALLS"
 rows=$(cat)
+[[ -n "${SSM_TEST_MENU_LOG:-}" ]] && printf '%s\n' "$rows" >> "$SSM_TEST_MENU_LOG"
+
+print_query=0
+for arg in "$@"; do
+  [[ "$arg" == "--print-query" ]] && print_query=1
+done
+
+if [[ $print_query -eq 1 ]]; then
+  if [[ -n "${SSM_TEST_PICK:-}" ]]; then
+    printf '%s\n' "${SSM_TEST_QUERY:-}"
+    printf '%s\n' "$rows" | sed -n "${SSM_TEST_PICK}p"
+    exit 0
+  fi
+  if [[ -n "${SSM_TEST_QUERY:-}" ]]; then
+    printf '%s\n' "$SSM_TEST_QUERY"
+    exit 1
+  fi
+  exit 130
+fi
+
 if [[ -z "${SSM_TEST_PICK:-}" ]]; then exit 130; fi
 printf '%s\n' "$rows" | sed -n "${SSM_TEST_PICK}p"

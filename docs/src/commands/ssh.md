@@ -17,6 +17,19 @@ through ECS Exec.
 5. Drops into an SSM shell session as `ubuntu`, or into the container via ECS
    Exec (the container shell uses `bash` when the image has it, otherwise `sh`)
 
+The environment menu shows each account's masked access key, such as
+`staging (AKIA****WXYZ)`, so similarly named accounts are easy to tell apart.
+Each choice stays on screen after its menu closes, whether you picked it, a
+flag answered it, or it was the only option:
+
+```
+✓ Account: staging (AKIA****WXYZ)
+✓ App: adam
+✓ Instance: i-0adam000000000001 adam-web-1 (only one)
+```
+
+`ssm db` and `ssm pod` show their choices the same way.
+
 ## Flags
 
 `--env` answers step 1, `--app` step 2, `--type ec2|ecs` step 3, and

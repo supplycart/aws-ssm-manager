@@ -1,6 +1,12 @@
 #!/bin/bash
 
 CONFIG_FILE="$HOME/.ssm/config.json"
+# `ssm db` maps <db>.tunnel to 127.0.0.1 here. SSM_HOSTS_FILE exists for
+# test/commands_test.sh, which points it at a scratch copy.
+HOSTS_FILE="${SSM_HOSTS_FILE:-/etc/hosts}"
+# One lease file per running `ssm db`, so parallel tunnels to the same database
+# share the hosts line and only the last one to close removes it.
+TUNNEL_DIR="$HOME/.ssm/tunnels"
 # The release workflow rewrites this line to the release tag (stamp_version in
 # .github/scripts/release.sh), so it must stay exactly SSM_VERSION="dev" here.
 SSM_VERSION="dev"
@@ -36,6 +42,14 @@ list_accounts() {
 select_menu() {
   local prompt="$1"
   shift
+  select_menu_header "$prompt" "" "$@"
+}
+
+# select_menu_header <prompt> <header> item...
+# select_menu with a line of help above the list; an empty header draws none.
+select_menu_header() {
+  local prompt="$1" header="$2"
+  shift 2
   local items=("$@")
 
   # Checked here rather than at startup: a fully-flagged run never opens a menu,
@@ -45,7 +59,27 @@ select_menu() {
     return 1
   fi
 
-  printf '%s\n' "${items[@]}" | fzf --prompt="$prompt " --height=~10 --layout=reverse --border
+  if [[ -n "$header" ]]; then
+    printf '%s\n' "${items[@]}" |
+      fzf --prompt="$prompt " --header="$header" --height=~15 --layout=reverse --border
+  else
+    printf '%s\n' "${items[@]}" | fzf --prompt="$prompt " --height=~10 --layout=reverse --border
+  fi
+}
+
+# print_choice <label> <value>
+#
+# fzf clears its menu once you pick, so without this nothing on screen says
+# what was chosen. One line on stderr per choice: callers run inside $( ).
+# Tabs in a menu row become spaces here.
+print_choice() {
+  local label="$1" value="$2" mark="*"
+  case "${LC_ALL:-${LC_CTYPE:-${LANG:-}}}" in
+    *[Uu][Tt][Ff]*) mark="✓" ;;
+  esac
+  label="$(printf '%s' "${label:0:1}" | tr '[:lower:]' '[:upper:]')${label:1}"
+  printf '%s%s %s:%s %s\n' "${C_BOLD}${C_GREEN}" "$mark" "$label" "$C_RESET" \
+    "$(printf '%s' "$value" | tr '\t' ' ')" >&2
 }
 
 # select_multi <prompt> <header> row...
@@ -256,12 +290,15 @@ resolve_selection() {
 
   if [[ -z "$wanted" ]]; then
     if [[ ${#rows[@]} -eq 1 && "$auto" == "auto" ]]; then
-      echo "Auto-selecting: ${rows[0]}" >&2
+      print_choice "$label" "${rows[0]} (only one)"
       printf '%s\n' "${rows[0]}"
-    else
-      select_menu "$prompt" "${rows[@]}"
+      return 0
     fi
-    return $?
+    local picked
+    picked=$(select_menu "$prompt" "${rows[@]}") || return 1
+    [[ -n "$picked" ]] && print_choice "$label" "$picked"
+    printf '%s\n' "$picked"
+    return 0
   fi
 
   local matches=() row field
@@ -275,6 +312,7 @@ resolve_selection() {
   done
 
   if [[ ${#matches[@]} -eq 1 ]]; then
+    print_choice "$label" "${matches[0]}"
     printf '%s\n' "${matches[0]}"
     return 0
   fi
@@ -648,19 +686,323 @@ get_db_port() {
   echo "$port"
 }
 
+# ---------------------------------------------------------------------------
+# The hosts entry behind `ssm db`. Only a line ssm wrote itself -- exactly
+# "127.0.0.1 <alias> # ssm-tunnel" -- is ever removed, and only once no other
+# running tunnel holds a lease on that alias. Lines are compared as whole
+# strings, never as a regex: an unanchored sed pattern with unescaped dots is
+# what used to take neighbouring entries with it.
+# ---------------------------------------------------------------------------
+
+HOSTS_TAG="# ssm-tunnel"
+
+hosts_line() {
+  printf '127.0.0.1 %s %s' "$1" "$HOSTS_TAG"
+}
+
+# True when any line already maps 127.0.0.1 to exactly this name -- ours, or
+# one the user wrote -- so a second entry is never added.
+hosts_has_entry() {
+  awk -v name="$1" '
+    { sub(/#.*/, "") }
+    $1 == "127.0.0.1" { for (i = 2; i <= NF; i++) if ($i == name) { found = 1; exit } }
+    END { exit !found }' "$HOSTS_FILE"
+}
+
+hosts_add_entry() {
+  local line
+  line=$(hosts_line "$1")
+  # A file without a final newline would glue our line onto its last one.
+  if [[ -s "$HOSTS_FILE" && -n "$(tail -c 1 "$HOSTS_FILE")" ]]; then
+    line=$'\n'"$line"
+  fi
+  printf '%s\n' "$line" | sudo tee -a "$HOSTS_FILE" > /dev/null
+}
+
+# Copies over the file rather than renaming onto it, so /etc/hosts keeps its
+# inode, owner and mode.
+hosts_remove_entry() {
+  local line tmp rc
+  line=$(hosts_line "$1")
+  grep -qxF -- "$line" "$HOSTS_FILE" || return 0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/ssm-hosts.XXXXXX") || return 1
+  awk -v line="$line" '$0 != line' "$HOSTS_FILE" > "$tmp" && sudo cp "$tmp" "$HOSTS_FILE"
+  rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# mkdir is atomic, and macOS has no flock. A lock older than a minute or so
+# belongs to an ssm that was killed while holding it.
+tunnel_lock() {
+  local lock="$TUNNEL_DIR/.lock" tries=0
+  mkdir -p "$TUNNEL_DIR" 2>/dev/null || return 1
+  until mkdir "$lock" 2>/dev/null; do
+    if [[ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]]; then
+      rmdir "$lock" 2>/dev/null
+      continue
+    fi
+    tries=$((tries + 1))
+    [[ $tries -ge 50 ]] && return 1
+    sleep 0.1
+  done
+}
+
+tunnel_unlock() {
+  rmdir "$TUNNEL_DIR/.lock" 2>/dev/null
+}
+
+# Prints how many running tunnels hold a lease on the alias, deleting the
+# leases of any whose process is gone.
+tunnel_live_leases() {
+  local alias="$1" f pid n=0
+  for f in "$TUNNEL_DIR/$alias".*; do
+    [[ -e "$f" ]] || continue
+    pid="${f##*.}"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if kill -0 "$pid" 2>/dev/null; then
+      n=$((n + 1))
+    else
+      rm -f "$f"
+    fi
+  done
+  echo "$n"
+}
+
+tunnel_acquire() {
+  local alias="$1" locked=0
+  tunnel_lock && locked=1
+  tunnel_live_leases "$alias" > /dev/null
+  touch "$TUNNEL_DIR/$alias.$$" 2>/dev/null
+  if ! hosts_has_entry "$alias"; then
+    echo "Adding $alias to $HOSTS_FILE (requires sudo) ..."
+    hosts_add_entry "$alias"
+  fi
+  [[ $locked -eq 1 ]] && tunnel_unlock
+  return 0
+}
+
+tunnel_release() {
+  local alias="$1"
+  if ! tunnel_lock; then
+    rm -f "$TUNNEL_DIR/$alias.$$"
+    echo "Could not lock $TUNNEL_DIR; leaving $alias in $HOSTS_FILE." >&2
+    return 1
+  fi
+  rm -f "$TUNNEL_DIR/$alias.$$"
+  if ! grep -qxF -- "$(hosts_line "$alias")" "$HOSTS_FILE"; then
+    : # Not ours: absent, or written by the user.
+  elif [[ "$(tunnel_live_leases "$alias")" -gt 0 ]]; then
+    echo "Leaving $alias in $HOSTS_FILE: another ssm db tunnel is still using it."
+  else
+    echo "Removing $alias from $HOSTS_FILE ..."
+    hosts_remove_entry "$alias"
+  fi
+  tunnel_unlock
+}
+
+# Each row carries the account's masked access key, so two accounts with
+# similar names can be told apart. Matching is on the name alone (field 1),
+# and only the name is printed, so callers never see the hint.
 pick_account() {
   local wanted="$1"
-  local accounts=()
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && accounts+=("$line")
-  done < <(list_accounts)
+  local accounts=() name profile table selected
+  table=$(aws_profile_keys)
+  while IFS=$'\t' read -r name profile; do
+    [[ -n "$name" ]] && accounts+=("$name"$'\t'"$(key_hint_for "$table" "$profile")")
+  done < <(jq -r 'keys[] as $k | [$k, (.[$k].profile // "")] | @tsv' "$CONFIG_FILE")
 
   if [[ ${#accounts[@]} -eq 0 ]]; then
     echo "No accounts found in $CONFIG_FILE" >&2
     return 1
   fi
 
-  resolve_selection "$wanted" "account" "$CONFIG_FILE" "Select account:" 1 "" "${accounts[@]}"
+  selected=$(resolve_selection "$wanted" "account" "$CONFIG_FILE" "Select account:" 1 "" \
+    "${accounts[@]}") || return 1
+  printf '%s\n' "${selected%%$'\t'*}"
+}
+
+# ---------------------------------------------------------------------------
+# AWS CLI profiles and regions, for `ssm config add` and `ssm config edit`.
+# ---------------------------------------------------------------------------
+
+# Prints "profile<TAB>access-key-id" for every profile in the AWS CLI's shared
+# files, key empty for a profile without one (SSO, assumed role). The files are
+# read directly -- one awk, where `aws configure get` per profile would cost a
+# Python start-up each and make every account menu slow to open.
+aws_profile_keys() {
+  local cred="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
+  local conf="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
+  local files=()
+  [[ -f "$cred" ]] && files+=("$cred")
+  [[ -f "$conf" ]] && files+=("$conf")
+  [[ ${#files[@]} -eq 0 ]] && return 0
+
+  awk -v cred="$cred" '
+    function trim(s) { gsub(/^[ \t]+|[ \t\r]+$/, "", s); return s }
+    /^[ \t]*\[/ {
+      s = $0
+      sub(/^[ \t]*\[/, "", s); sub(/\][ \t\r]*$/, "", s); s = trim(s)
+      # ~/.aws/config names a profile "[profile x]", except "[default]"; its
+      # other sections ([sso-session x], [services x]) are not profiles.
+      if (FILENAME != cred && s != "default") {
+        if (s !~ /^profile[ \t]+/) { cur = ""; next }
+        sub(/^profile[ \t]+/, "", s)
+      }
+      cur = s
+      if (!(cur in seen)) { seen[cur] = 1; order[++n] = cur }
+      next
+    }
+    cur != "" && /^[ \t]*aws_access_key_id[ \t]*=/ {
+      v = $0; sub(/^[^=]*=/, "", v); v = trim(v)
+      # The credentials file wins, as it does for the CLI.
+      if (!(cur in key) || FILENAME == cred) key[cur] = v
+    }
+    END { for (i = 1; i <= n; i++) printf "%s\t%s\n", order[i], key[order[i]] }
+  ' "${files[@]}" | LC_ALL=C sort
+}
+
+# key_hint_for <aws_profile_keys output> <profile> -> "(AKIA****WXYZ)"
+key_hint_for() {
+  printf '%s\n' "$1" | awk -F'\t' -v p="$2" '
+    p != "" && $1 == p { found = 1; key = $2; exit }
+    END {
+      if (!found) print "(no such AWS profile)"
+      else if (key == "") print "(no access key)"
+      else if (length(key) < 8) print "(****)"
+      else print "(" substr(key, 1, 4) "****" substr(key, length(key) - 3) ")"
+    }'
+}
+
+aws_profile_exists() {
+  aws_profile_keys | cut -f1 | grep -qxF -- "$1"
+}
+
+# The characters that survive an INI section header and a --profile argument.
+# A profile that already exists is accepted whatever its name.
+validate_profile_name() {
+  local profile="$1"
+  [[ "$profile" =~ ^[A-Za-z0-9][A-Za-z0-9._@+-]*$ ]] && return 0
+  aws_profile_exists "$profile" && return 0
+  echo "Error: '$profile' is not a valid AWS CLI profile name." >&2
+  echo "Use letters, digits and . _ - @ +, starting with a letter or digit." >&2
+  return 1
+}
+
+# pick_profile <wanted>
+#
+# The existing profiles, each with its masked key, plus whatever you type: a
+# name that matches nothing is taken as a new profile to create. fzf reports
+# that as exit 1 with the typed text on the first line of --print-query.
+pick_profile() {
+  local wanted="$1" table rows=() name key out rc query picked
+  if [[ -n "$wanted" ]]; then
+    validate_profile_name "$wanted" || return 1
+    printf '%s\n' "$wanted"
+    return 0
+  fi
+
+  if ! command -v fzf &>/dev/null; then
+    echo "Error: fzf is required but not installed. Run: brew install fzf" >&2
+    return 1
+  fi
+
+  table=$(aws_profile_keys)
+  while IFS=$'\t' read -r name key; do
+    [[ -n "$name" ]] && rows+=("$name"$'\t'"$(key_hint_for "$table" "$name")")
+  done <<< "$table"
+
+  out=$( { [[ ${#rows[@]} -gt 0 ]] && printf '%s\n' "${rows[@]}"; } |
+    fzf --print-query --prompt="AWS CLI profile: " \
+      --header="$PROFILE_HELP" --height=~15 --layout=reverse --border)
+  rc=$?
+  query=$(printf '%s\n' "$out" | sed -n 1p)
+  picked=$(printf '%s\n' "$out" | sed -n 2p)
+
+  if [[ $rc -eq 0 && -n "$picked" ]]; then
+    print_choice "profile" "$picked"
+    printf '%s\n' "${picked%%$'\t'*}"
+    return 0
+  fi
+  # 1 is "no match", which is how a new name arrives; anything else (130) is a
+  # cancelled menu.
+  [[ $rc -eq 1 && -n "$query" ]] || return 1
+  validate_profile_name "$query" || return 1
+  print_choice "profile" "$query (new)"
+  printf '%s\n' "$query"
+}
+
+PROFILE_HELP="An AWS CLI profile is a named set of keys saved in ~/.aws. Pick one, or type a new name and press Enter to create it."
+
+# The region list behind the picker, fetched when it opens rather than kept
+# here, so a region AWS opens appears without an ssm release. Public, and needs
+# no AWS credentials -- an account being added may not have any yet. ssm.ps1
+# uses the same URL, and test/parity_test.sh checks that. SSM_REGIONS_URL exists
+# for test/commands_test.sh, which serves a fixture from a local server.
+SSM_REGIONS_URL="${SSM_REGIONS_URL:-https://xcrone.github.io/aws-regions/data.json}"
+
+# Prints "code<TAB>name" per region that is open and has a code yet; nothing
+# at all when the list cannot be fetched.
+fetch_regions() {
+  curl -fsSL --max-time 5 "$SSM_REGIONS_URL" 2>/dev/null |
+    jq -r '.regions[]? | select(.available == true and (.code // "") != "")
+           | "\(.code)\t\(.name // "")"' 2>/dev/null
+}
+
+# Checked on shape, not against the fetched list, so a flag still works when
+# the list cannot be reached. The prefix is two letters or more: the European
+# Sovereign Cloud's is eusc-.
+validate_region() {
+  if [[ "$1" =~ ^[a-z]{2,}(-[a-z]+)+-[0-9]+$ ]]; then
+    return 0
+  fi
+  echo "Error: '$1' is not an AWS region code, like ap-southeast-1." >&2
+  echo "Leave out --region to pick one from a list." >&2
+  return 1
+}
+
+# pick_region <wanted> [current]
+pick_region() {
+  local wanted="$1" current="$2" rows=() line picked header
+  if [[ -n "$wanted" ]]; then
+    validate_region "$wanted" || return 1
+    printf '%s\n' "$wanted"
+    return 0
+  fi
+  echo "Fetching AWS regions..." >&2
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && rows+=("$line")
+  done < <(fetch_regions)
+
+  # Offline, or the list moved: asking for the code beats refusing to add.
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    echo "Could not fetch the region list from $SSM_REGIONS_URL." >&2
+    read -r -p "AWS region code (e.g. ap-southeast-1): " picked
+    [[ -z "$picked" ]] && return 1
+    validate_region "$picked" || return 1
+    printf '%s\n' "$picked"
+    return 0
+  fi
+
+  header="Type to filter by code or city, e.g. singapore."
+  [[ -n "$current" ]] && header="Currently $current. $header"
+  picked=$(select_menu_header "AWS region:" "$header" "${rows[@]}") || return 1
+  [[ -z "$picked" ]] && return 1
+  print_choice "region" "$picked"
+  printf '%s\n' "${picked%%$'\t'*}"
+}
+
+# Asks for a new profile's keys and writes it. Nothing is written without both.
+profile_create_prompt() {
+  local profile="$1" region="$2" key secret
+  echo "Creating AWS CLI profile '$profile'. Paste the access key pair from the AWS console (IAM > Security credentials)."
+  key="$ARG_ACCESS_KEY"
+  [[ -z "$key" ]] && read -r -p "Access Key ID: " key
+  [[ -z "$key" ]] && { echo "Aborted: no access key given." >&2; return 1; }
+  secret=$(read_secret_value "$ARG_SECRET_KEY") || return 1
+  [[ -z "$secret" ]] && { echo "Aborted: no secret key given." >&2; return 1; }
+  aws_profile_configure "$profile" "$key" "$secret" "$region"
+  echo "AWS CLI profile '$profile' configured."
 }
 
 pick_app() {
@@ -705,24 +1047,30 @@ pick_instance() {
 # The "Connect to:" menu, or the flags that stand in for it. --instance names an
 # EC2 box, --container/--task name an ECS one, so either settles the question.
 ssh_pick_target() {
+  local target
   if [[ "$ARG_TYPE" == "ec2" || -n "$ARG_INSTANCE" ]]; then
-    printf '%s' "EC2 instance"
+    target="EC2 instance"
   elif [[ "$ARG_TYPE" == "ecs" || -n "$ARG_CONTAINER" || -n "$ARG_TASK" ]]; then
-    printf '%s' "ECS task"
+    target="ECS task"
   else
-    select_menu "Connect to:" "EC2 instance" "ECS task"
+    target=$(select_menu "Connect to:" "EC2 instance" "ECS task") || return 1
   fi
+  [[ -n "$target" ]] && print_choice "target" "$target"
+  printf '%s' "$target"
 }
 
 # The "Open which shell?" menu on an ECS container instance, or its flags.
 ssh_pick_shell() {
+  local shell
   if [[ -n "$ARG_HOST" ]]; then
-    printf '%s' "Host shell"
+    shell="Host shell"
   elif [[ -n "$ARG_CONTAINER" || -n "$ARG_TASK" ]]; then
-    printf '%s' "Container shell (ECS Exec)"
+    shell="Container shell (ECS Exec)"
   else
-    select_menu "Open which shell?" "Host shell" "Container shell (ECS Exec)"
+    shell=$(select_menu "Open which shell?" "Host shell" "Container shell (ECS Exec)") || return 1
   fi
+  [[ -n "$shell" ]] && print_choice "shell" "$shell"
+  printf '%s' "$shell"
 }
 
 cmd_ssh() {
@@ -1048,17 +1396,13 @@ cmd_db() {
   fi
 
   DB_ALIAS="${DB_IDENTIFIER}.tunnel"
-  if ! grep -qF "127.0.0.1 $DB_ALIAS" /etc/hosts; then
-    echo "Adding $DB_ALIAS to /etc/hosts (requires sudo) ..."
-    echo "127.0.0.1 $DB_ALIAS" | sudo tee -a /etc/hosts > /dev/null
-  fi
+  tunnel_acquire "$DB_ALIAS"
 
-  cleanup() {
-    echo ""
-    echo "Removing $DB_ALIAS from /etc/hosts ..."
-    sudo sed -i '' "/127.0.0.1 $DB_ALIAS/d" /etc/hosts
-  }
-  trap cleanup EXIT
+  # The alias is baked into the trap text now, not read when the trap fires:
+  # an EXIT trap runs after cmd_db has returned, when its locals are gone. It
+  # used to read $DB_ALIAS then, got "", and deleted every 127.0.0.1 line.
+  # shellcheck disable=SC2064
+  trap "echo ''; tunnel_release '$DB_ALIAS'" EXIT
 
   local params
   params=$(jq -n \
@@ -1226,7 +1570,7 @@ config_view() {
 config_add() {
   local name profile region
   name="$ARG_ENV"
-  [[ -z "$name" ]] && read -r -p "Account name: " name
+  [[ -z "$name" ]] && read -r -p "Account name (your label for this AWS account in ssm, e.g. staging): " name
   [[ -z "$name" ]] && { echo "Aborted." >&2; return 1; }
 
   # Adding over an existing account used to replace it silently, taking its db
@@ -1240,37 +1584,29 @@ config_add() {
     echo "Replacing existing account '$name'."
   fi
 
-  profile="$ARG_PROFILE"
-  [[ -z "$profile" ]] && read -r -p "AWS profile: " profile
-  region="$ARG_REGION"
-  [[ -z "$region" ]] && read -r -p "AWS region: " region
+  profile=$(pick_profile "$ARG_PROFILE") || { echo "Aborted." >&2; return 1; }
+  region=$(pick_region "$ARG_REGION") || { echo "Aborted." >&2; return 1; }
+
+  # The AWS CLI profile is settled before the account is written, so backing
+  # out of the key prompts leaves nothing half-added.
+  local creds_given=""
+  [[ -n "$ARG_ACCESS_KEY" || -n "$ARG_SECRET_KEY" || -n "$SSM_AWS_SECRET_KEY" ]] && creds_given=1
+
+  if [[ -n "$ARG_SKIP_CREDENTIALS" ]]; then
+    if ! aws_profile_exists "$profile"; then
+      echo "Warning: AWS CLI profile '$profile' does not exist yet; ssm cannot reach AWS until it is set up." >&2
+    fi
+  elif aws_profile_exists "$profile" && [[ -z "$creds_given" ]]; then
+    echo "Using existing AWS CLI profile '$profile' $(key_hint_for "$(aws_profile_keys)" "$profile")."
+  else
+    profile_create_prompt "$profile" "$region" || return 1
+  fi
 
   local updated
-  updated=$(jq ".[\"$name\"] = {\"profile\": \"$profile\", \"region\": \"$region\", \"databases\": {}}" "$CONFIG_FILE")
+  updated=$(jq --arg name "$name" --arg profile "$profile" --arg region "$region" \
+    '.[$name] = {"profile": $profile, "region": $region, "databases": {}}' "$CONFIG_FILE") || return 1
   echo "$updated" > "$CONFIG_FILE"
   echo "Account '$name' added."
-
-  [[ -n "$ARG_SKIP_CREDENTIALS" ]] && return 0
-
-  local key secret
-  # Credentials supplied on the command line mean there is nothing to ask.
-  if [[ -n "$ARG_ACCESS_KEY" || -n "$ARG_SECRET_KEY" || -n "$SSM_AWS_SECRET_KEY" ]]; then
-    key="$ARG_ACCESS_KEY"
-    [[ -z "$key" ]] && read -r -p "Access Key ID: " key
-    secret=$(read_secret_value "$ARG_SECRET_KEY") || return 1
-    aws_profile_configure "$profile" "$key" "$secret" "$region"
-    echo "AWS CLI profile '$profile' configured."
-    return 0
-  fi
-
-  local setup
-  read -r -p "Set up AWS CLI credentials for profile '$profile'? [y/N]: " setup
-  if [[ "$setup" == "y" || "$setup" == "Y" ]]; then
-    read -r -p "Access Key ID: " key
-    secret=$(read_secret_value "") || return 1
-    aws_profile_configure "$profile" "$key" "$secret" "$region"
-    echo "AWS CLI profile '$profile' configured."
-  fi
 }
 
 config_delete() {
@@ -1348,6 +1684,9 @@ config_edit() {
       config_rename_account "$account" "$ARG_NAME" || return 1
       account="$ARG_NAME"
     fi
+    # Both are checked before anything is written, so a bad value changes nothing.
+    if [[ -n "$ARG_PROFILE" ]]; then validate_profile_name "$ARG_PROFILE" || return 1; fi
+    if [[ -n "$ARG_REGION" ]]; then validate_region "$ARG_REGION" || return 1; fi
     if [[ -n "$ARG_PROFILE" ]]; then
       config_set_field "$account" "profile" "$ARG_PROFILE" || return 1
       # Credential edits below belong to the profile we just moved to.
@@ -1407,12 +1746,18 @@ config_edit() {
         config_set_db_port "$account" "$db" "$value"
       fi
       ;;
-    profile|region)
-      local current value
-      current=$(load_config "$account" "$field")
-      read -r -p "$field [$current]: " value
-      value="${value:-$current}"
-      config_set_field "$account" "$field" "$value"
+    profile)
+      local value
+      value=$(pick_profile "") || return 1
+      if ! aws_profile_exists "$value"; then
+        profile_create_prompt "$value" "$(load_config "$account" "region")" || return 1
+      fi
+      config_set_field "$account" "profile" "$value"
+      ;;
+    region)
+      local value
+      value=$(pick_region "" "$(load_config "$account" "region")") || return 1
+      config_set_field "$account" "region" "$value"
       ;;
     aws-access-key)
       local current value
