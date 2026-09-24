@@ -16,6 +16,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   parity helpers; run with the syntax check
 - `pwsh -File test/ssm_test.ps1 && pwsh -File test/install_ps_test.ps1` — the PowerShell side, and
   a `Parser::ParseFile` pass over `ssm.ps1`/`install.ps1` as the `bash -n` equivalent
+- `bash test/commands_test.sh` — runs whole commands through **both** implementations against the
+  stubs in `test/stubs` (aws, kubectl, fzf, sudo) in a scratch `HOME`, and compares exit codes,
+  messages and the `config.json` each one writes. Needs `pwsh` on PATH, or it silently runs the
+  bash half only. Every other suite calls functions in isolation; this is the only one that
+  catches a command that cannot run at all
 - CI runs all of the above inside the one required `test` job, on `ubuntu-latest` (pwsh is
   preinstalled there). Deliberately not a windows-latest job: a second job would be green but not
   required until someone edits the ruleset by hand
@@ -25,6 +30,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   not part of the required check; add its two jobs to the ruleset to make it block
 - `cd docs && pnpm install && pnpm dev` — docs site at `http://localhost:5173/shells/aws-ssm-manager/`;
   `pnpm format` before committing (CI runs `pnpm format:check` and `pnpm build`)
+
+## Tests are part of the change, not a follow-up
+
+**Every feature, flag and bug fix ships with a test in the same commit.** No exceptions, and not
+"tests to follow": the Windows build shipped four bugs that made every command fail, and each one
+would have been a three-line case in `test/commands_test.sh`.
+
+- **A new or changed command or flag** — add a case to `test/commands_test.sh`, which runs the
+  real command in both implementations. A flag that only parses is not a tested flag; assert what
+  the command *does* with it.
+- **A bug fix** — write the case first and watch it fail with the bug in place. A fix whose test
+  passes before the fix is testing the wrong thing.
+- **A helper with logic worth trusting** (PATH edits, port picking, version stamping) — a unit case
+  in `test/ssm_test.ps1` or the matching `test/*_test.sh` as well, where the edge cases are cheap.
+- **Anything about how the two implementations must agree** — `test/parity_test.sh`.
+- **Anything about installing, updating or uninstalling on Windows** — a step in
+  `.github/workflows/install-windows.yml`, which installs for real on a Windows runner. Bugs in
+  that area are invisible from macOS and were all found there, not by reading the code.
+
+New behaviour that no existing suite fits gets a new suite, wired into the required `test` job in
+`.github/workflows/test.yml` and listed under Commands above. Run the full suite before pushing —
+`bash test/commands_test.sh` needs `pwsh` on PATH or it quietly tests half of what you think.
 
 ## Two implementations
 
@@ -55,8 +82,12 @@ and nowhere else:
   undo than the macOS one, which already leaks the entry on a hard kill.
 - **Dependencies** — Homebrew vs winget. `install.ps1` does **not** bootstrap winget the way
   `install.sh` bootstraps Homebrew; winget ships with Windows 11.
-- **PATH** — a `/usr/local/bin/ssm` symlink vs `%USERPROFILE%\.ssm` on the user PATH plus an
-  `ssm.cmd` shim. No symlink, so Developer Mode is never needed; nothing in `install.ps1` elevates.
+- **PATH** — a `/usr/local/bin/ssm` symlink vs `%USERPROFILE%\.ssm\bin` on the user PATH, holding
+  only an `ssm.cmd` shim. **Never put `%USERPROFILE%\.ssm` itself on the PATH:** PowerShell
+  resolves a bare name to a `.ps1` ahead of a `.cmd` in the same directory, so 5.1 would run
+  `ssm.ps1` directly and die on `#Requires -Version 7.2` (shipped in v1.2.5). Installs from before
+  the move are migrated by `install.ps1`, by `Repair-SsmUserPath`, and once at startup in
+  `Invoke-SsmMain`; the old shim's text is in `$SSM_LAUNCHER_LEGACY_TEXT`. No symlink, so Developer Mode is never needed; nothing in `install.ps1` elevates.
   **Writing `HKCU:\Environment` is only half of it:** Explorer hands every process it starts the
   environment it cached at sign-in, so without a `WM_SETTINGCHANGE` broadcast even a brand-new
   terminal gets the old PATH — which is what shipped in v1.2.3 and made `ssm` unrecognised until
@@ -72,7 +103,12 @@ and nowhere else:
 PowerShell traps this port already hit, all of them caught by `test/ssm_test.ps1`:
 
 - Variable names are **case-insensitive**, so `$account = ... $Account` silently clobbers the
-  parameter. Locals that shadow a parameter get a different name.
+  parameter. Locals that shadow a parameter get a different name — `$rest` inside a function whose
+  parameter is `$Rest` *is* that parameter, so clearing it throws every argument away.
+- A `[Parameter(ValueFromRemainingArguments)]` parameter binds to `$null`, not `@()`, when the
+  command is called with no arguments, and `@($null)` is a one-element array holding `$null` —
+  an empty string once it is passed on as `[string[]]`, which the arg parser then rejects as
+  `Unknown option ''`. Guard with `if ($null -ne $Rest)`.
 - `-eq`, `-contains`, `switch` and hashtable keys are case-insensitive too, so the arg parser uses
   `-ceq`/`-cne`/`-clike`, `switch -CaseSensitive` and `StringComparer.Ordinal`. bash's `case` is
   case-sensitive, and `--ENV` must stay an unknown option.
@@ -82,6 +118,15 @@ PowerShell traps this port already hit, all of them caught by `test/ssm_test.ps1
   possibly-empty array use `return , ([string[]]@(...))`.
 - A function returns everything on the success stream, so the exit code travels as an exception
   (`Exit-Ssm`) and prompts go to `Write-Host`, never `Write-Output`.
+- The `return , ([string[]]@(...))` above has a matching rule at the call site: **never wrap such a
+  call in `@()`**. `@(Get-SsmApps ...)` is an array holding the array, and a later `[string[]]`
+  cast flattens that into one `"adam beatrice charlie"` item — which is what made `--app` match
+  nothing. Use parentheses (`(Get-SsmApps ...) + (Get-SsmEcsApps)`), or a pipeline, both of which
+  unroll. And a function that forgets the leading comma returns a bare string for a one-item
+  result, so the caller's `.Count` throws.
+- `$x.PSObject.Properties.Name` throws under StrictMode when the object has no properties, and an
+  empty `config.json` (`{}`) is exactly that — it broke every account command on a fresh install.
+  Loop over `.PSObject.Properties` instead.
 - `$Host`, `$args`, `$input` and `$profile` are automatic variables; don't shadow them.
 
 `install.ps1` targets **Windows PowerShell 5.1** as well as 7, because that is what the Start Menu

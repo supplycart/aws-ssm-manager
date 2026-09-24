@@ -29,8 +29,8 @@ $env:SSM_INSTALL_VERSION = 'v1.1.0'; irm https://cdn.supplycart.my/shells/aws-ss
 ```
 
 Installs PowerShell 7, `awscli`, `kubectl`, the Session Manager plugin and (optionally) `fzf` via
-winget, writes `%USERPROFILE%\.ssm\ssm.ps1` and an `ssm.cmd` shim, puts that directory on your
-user PATH, and creates Start Menu and Desktop shortcuts. No `jq`: PowerShell parses JSON itself.
+winget, writes `%USERPROFILE%\.ssm\ssm.ps1` and an `ssm.cmd` shim in `%USERPROFILE%\.ssm\bin`,
+puts only `bin` on your user PATH, and creates Start Menu and Desktop shortcuts. No `jq`: PowerShell parses JSON itself.
 
 A pinned install stays on its release until `ssm update`, which moves it to the latest.
 

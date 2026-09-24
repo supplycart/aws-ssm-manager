@@ -46,10 +46,11 @@ What gets installed, via `winget`:
 - AWS CLI v2, the AWS Session Manager plugin and `kubectl`
 - `fzf`, which is optional — ssm falls back to a built-in picker if it is
   missing or fails to install
-- `%USERPROFILE%\.ssm\ssm.ps1` and `ssm.cmd`, plus an empty `config.json`
+- `%USERPROFILE%\.ssm\ssm.ps1`, the `%USERPROFILE%\.ssm\bin\ssm.cmd` shim, and
+  an empty `config.json`
 
-It then adds `%USERPROFILE%\.ssm` to your **user** PATH and creates an `ssm`
-shortcut in the Start Menu and on the Desktop.
+It then adds `%USERPROFILE%\.ssm\bin` to your **user** PATH and creates an
+`ssm` shortcut in the Start Menu and on the Desktop.
 
 There is no `jq` on Windows: PowerShell reads JSON itself.
 
@@ -70,7 +71,27 @@ ssm ssh --env staging --app adam
 ```
 
 `ssm.cmd` is what makes the bare word `ssm` work: `.ps1` is not in `PATHEXT`,
-and `cmd.exe` cannot run a PowerShell script directly.
+and `cmd.exe` cannot run a PowerShell script directly. It lives in its own
+`bin` folder so that PowerShell never finds `ssm.ps1` first — see below.
+
+### If `ssm` complains about `#requires` and PowerShell 7.2
+
+> `The script 'ssm.ps1' cannot be run because it contained a "#requires"
+statement for Windows PowerShell 7.2.`
+
+Installs up to **v1.2.5** put `%USERPROFILE%\.ssm` itself on the PATH. In that
+folder PowerShell picks `ssm.ps1` over `ssm.cmd`, so Windows PowerShell 5.1 ran
+the script directly instead of handing it to PowerShell 7.
+
+Run the installer again, from any PowerShell window. It moves the shim into
+`bin` and fixes the PATH, and `ssm` works in that same window straight away:
+
+```powershell
+irm https://cdn.supplycart.my/shells/aws-ssm-manager/install.ps1 | iex
+```
+
+Running any `ssm` command from PowerShell 7 or `cmd` makes the same move by
+itself, once you are on a release with this fix.
 
 ### If `ssm` is not recognized
 
@@ -99,7 +120,7 @@ Then open a new terminal. Signing out and back in also works, and always did.
 If it still does not resolve, check what actually got installed:
 
 ```powershell
-Test-Path "$env:USERPROFILE\.ssm\ssm.cmd"
+Test-Path "$env:USERPROFILE\.ssm\bin\ssm.cmd"
 (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
 ```
 

@@ -177,7 +177,13 @@ Install-SsmPackage -Id 'junegunn.fzf' -UserScope -Optional
 # ---------------------------------------------------------------------------
 $ssmDir = Join-Path $env:USERPROFILE '.ssm'
 $ssmScript = Join-Path $ssmDir 'ssm.ps1'
-$ssmLauncher = Join-Path $ssmDir 'ssm.cmd'
+# Only bin\ goes on the PATH. PowerShell resolves a bare `ssm` to ssm.ps1
+# ahead of ssm.cmd in the same directory, so with .ssm itself on the PATH,
+# Windows PowerShell 5.1 ran ssm.ps1 directly and stopped at #Requires 7.2.
+$ssmBin = Join-Path $ssmDir 'bin'
+$ssmLauncher = Join-Path $ssmBin 'ssm.cmd'
+# Where v1.2.5 and earlier put the shim.
+$legacyLauncher = Join-Path $ssmDir 'ssm.cmd'
 $configFile = Join-Path $ssmDir 'config.json'
 
 if (-not (Test-Path -LiteralPath $ssmDir)) {
@@ -224,15 +230,18 @@ where /q pwsh.exe && goto :run
 set "PATH=%ProgramFiles%\PowerShell\7;%LOCALAPPDATA%\Microsoft\PowerShell\7;%PATH%"
 where /q pwsh.exe || goto :nopwsh
 :run
-pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0ssm.ps1" %*
+pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\ssm.ps1" %*
 exit /b %ERRORLEVEL%
 :nopwsh
 echo ssm needs PowerShell 7. Install it with:  winget install Microsoft.PowerShell 1>&2
 exit /b 9009
 "@
 $crlf = ($launcherText -replace "`r?`n", "`r`n") + "`r`n"
+New-Item -ItemType Directory -Path $ssmBin -Force | Out-Null
 [System.IO.File]::WriteAllText($ssmLauncher, $crlf, (New-Object System.Text.ASCIIEncoding))
 Write-Ok "Installed $ssmLauncher"
+# Nothing runs the old one once its directory is off the PATH, below.
+Remove-Item -LiteralPath $legacyLauncher -Force -ErrorAction SilentlyContinue
 
 if (-not (Test-Path -LiteralPath $configFile)) {
     [System.IO.File]::WriteAllText($configFile, "{}`n", (New-Object System.Text.UTF8Encoding $false))
@@ -278,16 +287,22 @@ $key = Get-Item 'HKCU:\Environment'
 # downgrade REG_EXPAND_SZ to REG_SZ. Never use setx here either -- it
 # truncates at 1024 characters and will quietly corrupt a long PATH.
 $rawPath = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+# Add bin\, and take out the .ssm entry an earlier install added: left in, it
+# keeps PowerShell resolving `ssm` to ssm.ps1. The same rule as
+# Get-SsmRepairedPath in ssm.ps1, which `ssm update` applies.
+$kept = @()
 $already = $false
 foreach ($part in ($rawPath -split ';')) {
-    if ($part -and ($part.TrimEnd('\') -eq $ssmDir.TrimEnd('\'))) { $already = $true }
+    if (-not $part) { continue }
+    if ($part.TrimEnd('\') -eq $ssmDir.TrimEnd('\')) { continue }
+    if ($part.TrimEnd('\') -eq $ssmBin.TrimEnd('\')) { $already = $true }
+    $kept += $part
 }
-if ($already) {
+if (-not $already) { $kept += $ssmBin }
+$newPath = $kept -join ';'
+if ($newPath -ceq $rawPath) {
     Write-Ok 'ssm is already on your PATH'
 } else {
-    $newPath = $rawPath
-    if ($newPath -and -not $newPath.EndsWith(';')) { $newPath += ';' }
-    $newPath += $ssmDir
     $kind = 'ExpandString'
     try { $kind = $key.GetValueKind('Path') } catch { }
     [Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Environment', 'Path', $newPath, $kind)
@@ -306,8 +321,13 @@ if (-not $announced) {
     Write-Warn 'Windows did not acknowledge the PATH change.'
     Write-Warn 'If a new terminal cannot find ssm, sign out and back in once.'
 }
-# Usable in this session too, without reopening anything.
-$env:Path = "$env:Path;$ssmDir"
+# Usable in this session too, and without the old .ssm entry, which would
+# still send `ssm` to ssm.ps1 here.
+$sessionPath = @()
+foreach ($part in ($env:Path -split ';')) {
+    if ($part -and ($part.TrimEnd('\') -ne $ssmDir.TrimEnd('\'))) { $sessionPath += $part }
+}
+$env:Path = (($sessionPath + $ssmBin) -join ';')
 
 # ---------------------------------------------------------------------------
 # Shortcuts. This is what makes it app-like: double-click and ssm asks what you
@@ -366,9 +386,16 @@ if (-not $probeOk) {
     Write-Warn 'ssm was installed but did not run:'
     Write-Warn "  $probe"
     Write-Warn "Try it directly: $ssmLauncher version"
-} elseif (-not (Get-Command ssm -ErrorAction SilentlyContinue)) {
-    # It runs, but the bare word does not resolve -- PATHEXT, almost certainly.
-    Write-Warn "ssm runs, but the name does not resolve yet; use $ssmLauncher"
+} else {
+    # It runs; now check the bare word reaches the shim and not some other
+    # ssm -- the old .ssm\ssm.ps1 above all, which 5.1 cannot run.
+    $resolved = Get-Command ssm -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $resolved) {
+        Write-Warn "ssm runs, but the name does not resolve yet; use $ssmLauncher"
+    } elseif ($resolved.Source -ne $ssmLauncher) {
+        Write-Warn "In this terminal 'ssm' runs $($resolved.Source), not $ssmLauncher."
+        Write-Warn 'Remove that from your PATH, or open a new terminal.'
+    }
 }
 
 Write-Host ''

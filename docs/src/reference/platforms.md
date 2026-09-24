@@ -20,7 +20,7 @@ What genuinely differs is below. This page is the whole list.
 | JSON parsing       | `jq`                              | built into PowerShell                    |
 | Fuzzy menus        | `fzf`, required                   | `fzf` if present, else a built-in picker |
 | Where it lives     | `~/.ssm/ssm.sh`                   | `%USERPROFILE%\.ssm\ssm.ps1`             |
-| How `ssm` resolves | a symlink at `/usr/local/bin/ssm` | `ssm.cmd` on your user PATH              |
+| How `ssm` resolves | a symlink at `/usr/local/bin/ssm` | `.ssm\bin\ssm.cmd` on your user PATH     |
 | Shortcuts          | none                              | Start Menu and Desktop                   |
 | `ssm db` hostname  | `<identifier>.tunnel`             | `127.0.0.1`                              |
 | Elevation          | `sudo`, once, at install          | none for ssm itself                      |

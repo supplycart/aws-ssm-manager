@@ -42,7 +42,8 @@ permissions:
 
 jobs:
     install:
-        name: install (${{ matrix.shell }})
+        # The fresh jobs keep the plain names, which is what a ruleset names.
+        name: install (${{ matrix.shell }}${{ matrix.from != 'fresh' && format(', from {0}', matrix.from) || '' }})
         runs-on: windows-latest
         timeout-minutes: 30
         strategy:
@@ -50,6 +51,9 @@ jobs:
             matrix:
                 # powershell = Windows PowerShell 5.1, what the Start Menu opens.
                 shell: [powershell, pwsh]
+                # A PR also upgrades a real v1.2.5 install: the last layout
+                # with .ssm itself on the PATH, which 5.1 could not run.
+                from: ${{ inputs.version == '' && fromJSON('["fresh", "v1.2.5"]') || fromJSON('["fresh"]') }}
         env:
             SSM_TEST_VERSION: ${{ inputs.version }}
             SSM_TEST_SHELL: ${{ matrix.shell }}
@@ -57,6 +61,36 @@ jobs:
             - name: Checkout
               if: inputs.version == ''
               uses: actions/checkout@v6
+
+            # What `ssm update` does to a v1.2.5 install: the old script's
+            # update code puts the new ssm.ps1 beside the old shim. The new
+            # script has to move itself into bin\ on its next run -- checked
+            # here -- and the installer below then runs over the result.
+            - name: Start from ${{ matrix.from }}
+              if: matrix.from != 'fresh'
+              shell: pwsh
+              env:
+                  SSM_INSTALL_VERSION: ${{ matrix.from }}
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  # That release's own installer: the latest one writes the new
+                  # layout, and the point is to start from the old one.
+                  $url = "https://cdn.supplycart.my/shells/aws-ssm-manager/$env:SSM_INSTALL_VERSION/install.ps1"
+                  & $env:SSM_TEST_SHELL -NoProfile -ExecutionPolicy Bypass -Command "irm '$url' | iex"
+                  if ($LASTEXITCODE -ne 0) { throw "Installing $env:SSM_INSTALL_VERSION exited $LASTEXITCODE." }
+
+                  $dir = Join-Path $env:USERPROFILE '.ssm'
+                  Copy-Item ssm.ps1 (Join-Path $dir 'ssm.ps1') -Force
+                  $out = (& (Join-Path $dir 'ssm.cmd') version 2>&1) -join "`n"
+                  if ($LASTEXITCODE -ne 0) { throw "The old shim could not run the new script: $out" }
+                  Write-Host $out
+
+                  if (-not (Test-Path (Join-Path $dir 'bin\ssm.cmd'))) { throw 'The new script did not move the shim into bin\.' }
+                  $path = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+                  $parts = $path -split ';' | ForEach-Object { $_.TrimEnd('\') }
+                  if ($parts -contains $dir) { throw "The old .ssm PATH entry survived the move: $path" }
+                  if ($parts -notcontains (Join-Path $dir 'bin')) { throw "bin\ is not on the PATH after the move: $path" }
+                  Write-Host 'The v1.2.5 layout moved itself.'
 
             - name: Install
               shell: pwsh
@@ -112,10 +146,12 @@ jobs:
               run: |
                   $ErrorActionPreference = 'Stop'
                   $dir = Join-Path $env:USERPROFILE '.ssm'
-                  $shim = Join-Path $dir 'ssm.cmd'
-                  foreach ($f in 'ssm.ps1', 'ssm.cmd', 'config.json') {
+                  $bin = Join-Path $dir 'bin'
+                  $shim = Join-Path $bin 'ssm.cmd'
+                  foreach ($f in 'ssm.ps1', 'bin\ssm.cmd', 'config.json') {
                     if (-not (Test-Path -LiteralPath (Join-Path $dir $f))) { throw "$f was not installed." }
                   }
+                  if (Test-Path -LiteralPath (Join-Path $dir 'ssm.cmd')) { throw 'The old .ssm\ssm.cmd was left behind.' }
 
                   $out = (& $shim version 2>&1) -join "`n"
                   if ($LASTEXITCODE -ne 0) { throw "ssm version exited ${LASTEXITCODE}: $out" }
@@ -130,15 +166,24 @@ jobs:
                   if ($LASTEXITCODE -ne 0) { throw "ssm help exited $LASTEXITCODE." }
 
                   $path = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
-                  if (-not (($path -split ';') | Where-Object { $_.TrimEnd('\') -eq $dir })) {
-                    throw "$dir is not on the user PATH: $path"
-                  }
+                  $parts = $path -split ';' | ForEach-Object { $_.TrimEnd('\') }
+                  if ($parts -notcontains $bin) { throw "$bin is not on the user PATH: $path" }
+                  # On the PATH, .ssm makes PowerShell pick ssm.ps1 over the shim.
+                  if ($parts -contains $dir) { throw "$dir itself is on the user PATH: $path" }
                   $kind = (Get-Item 'HKCU:\Environment').GetValueKind('Path')
                   if ($kind -ne 'ExpandString') { throw "User PATH was written as $kind, not ExpandString." }
 
-                  # A new process that picks the PATH up from the registry, the
-                  # way a fresh terminal would.
+                  # A bare `ssm` in a new process with the PATH from the registry,
+                  # the way a fresh terminal gets it -- in cmd, and in the very
+                  # PowerShell under test. PowerShell resolves names its own way
+                  # (a .ps1 beats a .cmd), and checking through cmd alone is how
+                  # 5.1 running ssm.ps1 directly got past this workflow once.
                   $fresh = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' + [Environment]::ExpandEnvironmentVariables($path)
                   $out = cmd /c "set PATH=$fresh&& ssm version" 2>&1
-                  if ($LASTEXITCODE -ne 0) { throw "Bare 'ssm' did not resolve from the new PATH: $out" }
+                  if ($LASTEXITCODE -ne 0) { throw "Bare 'ssm' did not run from cmd: $out" }
+                  $env:SSM_FRESH_PATH = $fresh
+                  $out = (& $env:SSM_TEST_SHELL -NoProfile -Command '$env:Path = $env:SSM_FRESH_PATH; (Get-Command ssm).Source; ssm version; exit $LASTEXITCODE' 2>&1) -join "`n"
+                  if ($LASTEXITCODE -ne 0) { throw "Bare 'ssm' did not run from ${env:SSM_TEST_SHELL}: $out" }
+                  if ($out -notmatch [regex]::Escape($shim)) { throw "In $env:SSM_TEST_SHELL, 'ssm' is not the shim: $out" }
+                  Write-Host "In ${env:SSM_TEST_SHELL}: $out"
                   Write-Host 'Installed and runnable.'
