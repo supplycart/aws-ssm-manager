@@ -31,9 +31,11 @@ database ports included.
 
 ## Why `ssm db` differs
 
-On macOS, `ssm db` adds `127.0.0.1  <identifier>.tunnel` to `/etc/hosts` so you
-can point a database client at a name rather than an address, and removes it
-again when the tunnel closes.
+On macOS, `ssm db` adds `127.0.0.1 <identifier>.tunnel # ssm-tunnel` to
+`/etc/hosts` so you can point a database client at a name rather than an
+address. It removes the line when the last tunnel using it closes (see
+[ssm db](/commands/db)). The leases in `~/.ssm/tunnels/` that track this are
+macOS only, because Windows never writes the hosts file.
 
 Windows keeps its hosts file in `C:\Windows\System32\drivers\etc\hosts`, which
 is writable only by an administrator. Matching macOS would mean a UAC consent
@@ -71,3 +73,8 @@ winget install junegunn.fzf
 
 Either way, every menu has a flag that replaces it, so a fully flagged command
 never opens one at all.
+
+The profile menu in `ssm config add` accepts a name that is not in the list, to
+create a new profile. With `fzf` that is `--print-query`: type the name and
+press Enter. The built-in picker does the same: once nothing matches, it shows
+the typed name as a new entry, and Enter takes it.

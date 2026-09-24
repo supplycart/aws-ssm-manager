@@ -76,7 +76,7 @@ echo "resolve_selection"
 
 ACCOUNTS=("staging" "production")
 
-out=$(resolve_selection "staging" "account" "$CONFIG_FILE" "Select account:" 1 "" "${ACCOUNTS[@]}")
+out=$(resolve_selection "staging" "account" "$CONFIG_FILE" "Select account:" 1 "" "${ACCOUNTS[@]}" 2>/dev/null)
 assert_eq "staging" "$out" "exact match returns the row without prompting"
 
 assert_status 1 "no match exits 1" \
@@ -87,10 +87,10 @@ assert_contains "staging" "$LAST_OUTPUT" "no-match message lists the candidates"
 # Instances are "id<TAB>Name" and are matchable on either column.
 INSTANCES=("i-0abc	web-01" "i-0def	web-02")
 
-out=$(resolve_selection "i-0def" "instance" "app adam" "Select instance:" "1,2" auto "${INSTANCES[@]}")
+out=$(resolve_selection "i-0def" "instance" "app adam" "Select instance:" "1,2" auto "${INSTANCES[@]}" 2>/dev/null)
 assert_eq "i-0def	web-02" "$out" "matches on the id column"
 
-out=$(resolve_selection "web-01" "instance" "app adam" "Select instance:" "1,2" auto "${INSTANCES[@]}")
+out=$(resolve_selection "web-01" "instance" "app adam" "Select instance:" "1,2" auto "${INSTANCES[@]}" 2>/dev/null)
 assert_eq "i-0abc	web-01" "$out" "matches on the Name column"
 
 # Only field 1 is searched here, so a field-2 value must not match.
@@ -105,6 +105,12 @@ assert_contains "task-2" "$LAST_OUTPUT" "ambiguous message lists the matches"
 
 out=$(resolve_selection "" "instance" "app adam" "Select instance:" 1 auto "i-0abc	web-01" 2>/dev/null)
 assert_eq "i-0abc	web-01" "$out" "single candidate auto-selects when no value is given"
+
+# What was chosen is shown on stderr, never on stdout, which callers capture.
+err=$(resolve_selection "" "instance" "app adam" "Select instance:" 1 auto "i-0abc	web-01" 2>&1 >/dev/null)
+assert_contains "Instance: i-0abc web-01 (only one)" "$err" "an auto-selected row is shown"
+err=$(resolve_selection "staging" "account" "config" "Select account:" 1 "" "${ACCOUNTS[@]}" 2>&1 >/dev/null)
+assert_contains "Account: staging" "$err" "a flag match is shown"
 
 echo "read_secret_value"
 
@@ -200,6 +206,113 @@ assert_status 1 "non-numeric port" validate_port abc
 assert_status 1 "negative port" validate_port -5
 assert_status 1 "port with a decimal point" validate_port 154.32
 assert_status 1 "empty port" validate_port ""
+
+echo "validate_region"
+
+assert_status 0 "a commercial region" validate_region ap-southeast-5
+assert_status 0 "a GovCloud region" validate_region us-gov-west-1
+assert_status 0 "the sovereign cloud's four-letter prefix" validate_region eusc-de-east-1
+assert_status 0 "a region newer than any list" validate_region xx-future-9
+assert_status 1 "a word" validate_region bogus
+assert_contains "not an AWS region code" "$LAST_OUTPUT" "the region error says what is wrong"
+assert_status 1 "upper case" validate_region AP-SOUTHEAST-1
+assert_status 1 "no number" validate_region ap-southeast
+assert_status 1 "a trailing space" validate_region "ap-southeast-1 "
+
+echo "AWS CLI profiles"
+
+AWS_TMP=$(mktemp -d)
+cat > "$AWS_TMP/credentials" <<'EOF'
+# a comment
+[sc-staging]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = not-a-secret
+[both]
+aws_access_key_id=AKIACREDENTIALS0WINS
+[short]
+aws_access_key_id = AKIA12
+EOF
+cat > "$AWS_TMP/config" <<'EOF'
+[default]
+region = ap-southeast-1
+[profile sso-dev]
+sso_session = corp
+[profile both]
+aws_access_key_id = AKIACONFIGLOSES00000
+[sso-session corp]
+sso_start_url = https://example.awsapps.com/start
+EOF
+AWS_SHARED_CREDENTIALS_FILE="$AWS_TMP/credentials" AWS_CONFIG_FILE="$AWS_TMP/config"
+export AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE
+
+table=$(aws_profile_keys)
+assert_eq "both default sc-staging short sso-dev" "$(printf '%s\n' "$table" | cut -f1 | tr '\n' ' ' | sed 's/ $//')" \
+  "profiles from both files, [profile x] unwrapped, sso-session skipped, sorted"
+assert_eq "(AKIA****MPLE)" "$(key_hint_for "$table" sc-staging)" "a key is masked"
+assert_eq "(AKIA****WINS)" "$(key_hint_for "$table" both)" "the credentials file wins over config"
+assert_eq "(no access key)" "$(key_hint_for "$table" sso-dev)" "an SSO profile has no key"
+assert_eq "(****)" "$(key_hint_for "$table" short)" "a key too short to mask is hidden whole"
+assert_eq "(no such AWS profile)" "$(key_hint_for "$table" nope)" "a missing profile says so"
+assert_eq "(no such AWS profile)" "$(key_hint_for "$table" "")" "an empty profile is missing, not keyless"
+
+assert_status 0 "an existing profile" aws_profile_exists sso-dev
+assert_status 1 "a missing profile" aws_profile_exists nope
+assert_status 0 "a plain new profile name" validate_profile_name my-team.prod_2
+assert_status 1 "a name with a space" validate_profile_name "bad name"
+assert_status 1 "a name with a bracket" validate_profile_name "bad]"
+assert_status 1 "a name starting with a dash" validate_profile_name "-x"
+
+rm -rf "$AWS_TMP"
+unset AWS_SHARED_CREDENTIALS_FILE AWS_CONFIG_FILE
+
+echo "hosts entries and tunnel leases"
+
+HOSTS_TMP=$(mktemp -d)
+HOSTS_FILE="$HOSTS_TMP/hosts"
+TUNNEL_DIR="$HOSTS_TMP/tunnels"
+# sudo runs the command as-is here; the real one is what reaches /etc/hosts.
+sudo() { "$@"; }
+
+printf '127.0.0.1 localhost\n127.0.0.1 adam-db.tunnel.local\n' > "$HOSTS_FILE"
+assert_status 1 "a longer name is not the alias" hosts_has_entry adam-db.tunnel
+printf '127.0.0.1 localhost adam-db.tunnel # mine\n' > "$HOSTS_FILE"
+assert_status 0 "the alias as a second name on a line counts" hosts_has_entry adam-db.tunnel
+printf '# 127.0.0.1 adam-db.tunnel\n' > "$HOSTS_FILE"
+assert_status 1 "a commented-out line does not count" hosts_has_entry adam-db.tunnel
+
+# A file with no final newline must not have our line glued onto its last one.
+printf '127.0.0.1 localhost' > "$HOSTS_FILE"
+hosts_add_entry adam-db.tunnel
+assert_eq "127.0.0.1 localhost
+127.0.0.1 adam-db.tunnel # ssm-tunnel" "$(cat "$HOSTS_FILE")" "added on a line of its own"
+
+printf '%s\n' "127.0.0.1 localhost" "127.0.0.1 adam-db.tunnel # ssm-tunnel" \
+  "127.0.0.1 adam-db.tunnel" "127.0.0.1 adam-db.tunnel # ssm-tunnel-other" > "$HOSTS_FILE"
+hosts_remove_entry adam-db.tunnel
+assert_eq "127.0.0.1 localhost
+127.0.0.1 adam-db.tunnel
+127.0.0.1 adam-db.tunnel # ssm-tunnel-other" "$(cat "$HOSTS_FILE")" "only the exact tagged line goes"
+
+# A lock left by an ssm that was killed while holding it is broken, not waited on.
+mkdir -p "$TUNNEL_DIR/.lock"
+touch -t 202001010000 "$TUNNEL_DIR/.lock"
+assert_status 0 "a stale lock is broken" tunnel_lock
+tunnel_unlock
+assert_status 1 "unlocking removes the lock" test -d "$TUNNEL_DIR/.lock"
+
+# A fresh lock held by someone else is waited on, then given up.
+mkdir -p "$TUNNEL_DIR/.lock"
+assert_status 1 "a live lock is not stolen" tunnel_lock
+rmdir "$TUNNEL_DIR/.lock"
+
+touch "$TUNNEL_DIR/adam-db.tunnel.999999" "$TUNNEL_DIR/adam-db.tunnel.$$"
+assert_eq "1" "$(tunnel_live_leases adam-db.tunnel)" "only live leases count"
+assert_status 1 "a dead lease is pruned" test -e "$TUNNEL_DIR/adam-db.tunnel.999999"
+rm -f "$TUNNEL_DIR/adam-db.tunnel.$$"
+
+rm -rf "$HOSTS_TMP"
+unset -f sudo
+HOSTS_FILE=/nonexistent/hosts
 
 echo "config file helpers"
 

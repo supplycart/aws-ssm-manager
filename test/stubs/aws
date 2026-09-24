@@ -59,6 +59,11 @@ case "$1 $2" in
     # know it was reached, and with which target.
     target=$(printf '%s\n' "$all" | sed -n 's/.*--target \([^ ]*\).*/\1/p')
     echo "STUB session to $target"
+    # What the hosts file looked like while the tunnel was up, for the tests
+    # that check ssm db added its line before connecting.
+    if [[ -n "${SSM_HOSTS_FILE:-}" && -f "$SSM_HOSTS_FILE" ]]; then
+      cp "$SSM_HOSTS_FILE" "$HOME/hosts-during-session"
+    fi
     ;;
   'configure set')
     printf '%s\n' "$all" >> "$HOME/.aws-stub-writes"

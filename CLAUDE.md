@@ -186,6 +186,26 @@ paths (`SSM_DIR`, `SSM_SYMLINK`, `AWS_CLI_DIR`, `SSM_PLUGIN_DIR`, ...) are globa
 point them at a scratch directory and stub `brew` and `sudo`. It is the one command that runs
 without jq — the startup check skips it — so keep jq calls out of it.
 
+`resolve_selection` also prints what was chosen (`✓ Account: staging (AKIA****WXYZ)`) to stderr
+through `print_choice`, on every path: menu, flag match and auto-select. The account and profile
+menus carry a masked key read straight from `~/.aws/credentials` and `~/.aws/config` by
+`aws_profile_keys` — one awk, never `aws configure get` per row, which would cost a Python
+start-up each. `pick_account` returns field 1 only, so callers never see the hint.
+
+The `config add`/`edit` region menu is fetched at run time from
+`https://xcrone.github.io/aws-regions/data.json` (`SSM_REGIONS_URL` / `$SSM_REGIONS_URL`; the
+parity test holds both scripts to the same URL). No hard-coded region table: an unreachable list
+falls back to typing the code, and `validate_region` checks shape only. `test/commands_test.sh`
+serves a fixture from a local `python3 -m http.server`, so no case touches the network.
+
+`ssm db`'s `/etc/hosts` line is `127.0.0.1 <alias> # ssm-tunnel`, compared as a whole string —
+never a regex. `tunnel_acquire`/`tunnel_release` keep one lease per running tunnel in
+`~/.ssm/tunnels/<alias>.<pid>` under a `mkdir` lock, and only the last live lease removes the line;
+an untagged line for the alias is the user's and is never removed. The EXIT trap bakes the alias
+into its text: it runs after `cmd_db` has returned, when its locals are gone, and reading one there
+is what used to delete every `127.0.0.1` line. `SSM_HOSTS_FILE` points the whole thing at a scratch
+file for the tests, and the `sudo` stub runs its command only when `SSM_TEST_SUDO_EXEC=1`.
+
 Secrets never come from a flag value: `read_secret_value` takes `SSM_AWS_SECRET_KEY` or one line
 of stdin via `--secret-key -`.
 

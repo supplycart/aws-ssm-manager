@@ -116,7 +116,9 @@ Assert-Contains "ambiguous container 'php-fpm'" $script:LastErr 'ambiguous messa
 
 $one = [string[]]@("i-0abc`tweb-01")
 Assert-Eq "i-0abc`tweb-01" (Invoke-Capture { Resolve-SsmSelection '' 'instance' 'app adam' 'Select:' '1' 'auto' $one }) 'a single candidate auto-selects'
-Assert-Contains 'Auto-selecting:' $script:LastErr 'auto-select says so'
+Assert-Contains 'Instance: i-0abc web-01 (only one)' $script:LastErr 'auto-select shows what it picked'
+Invoke-Capture { Resolve-SsmSelection 'web-02' 'instance' 'app adam' 'Select:' '1,2' '' $rows } | Out-Null
+Assert-Contains 'Instance: i-0def web-02' $script:LastErr 'a flag match is shown'
 
 # The return value is the only thing on the success stream: a status line
 # leaking into it would be captured by every caller.
@@ -303,6 +305,55 @@ Assert-Eq 3 (Select-SsmPickerView $items '').Count 'an empty filter keeps everyt
 Assert-Eq 'stg-eu' ((Select-SsmPickerView $items 'stg') -join ',') 'a substring filter'
 Assert-Eq 'stg-eu' ((Select-SsmPickerView $items 'STG') -join ',') 'the filter ignores case'
 Assert-Eq 0 (Select-SsmPickerView $items 'zzz').Count 'no matches is empty, not everything'
+
+Write-Host 'Select-SsmPickerChoice'
+
+Assert-Eq 'stg-eu' (Select-SsmPickerChoice -Items $items -Filter 'stg') 'Enter takes the first match'
+Assert-Eq $null (Select-SsmPickerChoice -Items $items -Filter 'zzz') 'no match and no -AllowNew is nothing'
+Assert-Eq 'zzz' (Select-SsmPickerChoice -Items $items -Filter 'zzz' -AllowNew) '-AllowNew returns the typed text'
+Assert-Eq $null (Select-SsmPickerChoice -Items ([string[]]@()) -Filter '' -AllowNew) 'nothing typed is not a new name'
+
+Write-Host 'Test-SsmRegion'
+
+Assert-True (Test-SsmRegion 'ap-southeast-5') 'a commercial region'
+Assert-True (Test-SsmRegion 'us-gov-west-1') 'a GovCloud region'
+Assert-True (Test-SsmRegion 'eusc-de-east-1') "the sovereign cloud's four-letter prefix"
+Assert-False (Invoke-Capture { Test-SsmRegion 'bogus' }) 'a word'
+Assert-Contains 'not an AWS region code' $script:LastErr 'the region error says what is wrong'
+Assert-False (Invoke-Capture { Test-SsmRegion 'AP-SOUTHEAST-1' }) 'upper case'
+
+Write-Host 'AWS CLI profiles'
+
+$awsTmp = Join-Path ([System.IO.Path]::GetTempPath()) "ssm-aws-$PID"
+New-Item -ItemType Directory -Path $awsTmp -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $awsTmp 'credentials') -Value @(
+    '# a comment', '[sc-staging]', 'aws_access_key_id = AKIAIOSFODNN7EXAMPLE',
+    '[both]', 'aws_access_key_id=AKIACREDENTIALS0WINS', '[short]', 'aws_access_key_id = AKIA12')
+Set-Content -LiteralPath (Join-Path $awsTmp 'config') -Value @(
+    '[default]', 'region = ap-southeast-1', '[profile sso-dev]', 'sso_session = corp',
+    '[profile both]', 'aws_access_key_id = AKIACONFIGLOSES00000', '[sso-session corp]', 'sso_start_url = x')
+$env:AWS_SHARED_CREDENTIALS_FILE = Join-Path $awsTmp 'credentials'
+$env:AWS_CONFIG_FILE = Join-Path $awsTmp 'config'
+
+$table = Get-SsmAwsProfileKeys
+Assert-Eq 'both default sc-staging short sso-dev' (($table | ForEach-Object { ($_ -split "`t")[0] }) -join ' ') `
+    'profiles from both files, [profile x] unwrapped, sso-session skipped, sorted'
+Assert-Eq '(AKIA****MPLE)' (Get-SsmKeyHint $table 'sc-staging') 'a key is masked'
+Assert-Eq '(AKIA****WINS)' (Get-SsmKeyHint $table 'both') 'the credentials file wins over config'
+Assert-Eq '(no access key)' (Get-SsmKeyHint $table 'sso-dev') 'an SSO profile has no key'
+Assert-Eq '(****)' (Get-SsmKeyHint $table 'short') 'a key too short to mask is hidden whole'
+Assert-Eq '(no such AWS profile)' (Get-SsmKeyHint $table 'nope') 'a missing profile says so'
+Assert-Eq '(no such AWS profile)' (Get-SsmKeyHint $table '') 'an empty profile is missing, not keyless'
+
+Assert-True (Test-SsmAwsProfileExists 'sso-dev') 'an existing profile'
+Assert-False (Test-SsmAwsProfileExists 'nope') 'a missing profile'
+Assert-True (Test-SsmProfileName 'my-team.prod_2') 'a plain new profile name'
+Assert-False (Invoke-Capture { Test-SsmProfileName 'bad name' }) 'a name with a space'
+Assert-False (Invoke-Capture { Test-SsmProfileName 'bad]' }) 'a name with a bracket'
+Assert-False (Invoke-Capture { Test-SsmProfileName '-x' }) 'a name starting with a dash'
+
+Remove-Item -LiteralPath $awsTmp -Recurse -Force
+Remove-Item Env:AWS_SHARED_CREDENTIALS_FILE, Env:AWS_CONFIG_FILE
 
 Write-Host 'ConvertTo-SsmCanonicalFlag'
 

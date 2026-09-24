@@ -132,6 +132,19 @@ count_cdn() { grep -cF "$CDN" "$1" 2>/dev/null || echo 0; }
 assert_eq "1" "$(count_cdn "$PS")" "ssm.ps1 names the CDN once"
 assert_eq "1" "$(count_cdn "$ROOT/ssm.sh")" "ssm.sh names the CDN once"
 
+echo "the region list URL"
+
+# The region picker fetches its list at run time; both implementations must
+# read the same one, or the two platforms offer different regions.
+sh_regions=$(sed -n 's/^SSM_REGIONS_URL="\${SSM_REGIONS_URL:-\(.*\)}"$/\1/p' "$SH")
+ps_regions=$(sed -n "s/^\$SSM_REGIONS_URL = .* else { '\(.*\)' }\$/\1/p" "$PS")
+if [[ -n "$sh_regions" ]]; then pass; else fail "ssm.sh defines SSM_REGIONS_URL"; fi
+assert_eq "$sh_regions" "$ps_regions" "both fetch regions from the same URL"
+if [[ -n "$sh_regions" ]]; then
+  assert_eq "1" "$(grep -cF "$sh_regions" "$SH")" "ssm.sh names the region URL once"
+  assert_eq "1" "$(grep -cF "$sh_regions" "$PS")" "ssm.ps1 names the region URL once"
+fi
+
 echo "help text is identical"
 
 # The strongest parity check there is: run both and diff. Only the platform

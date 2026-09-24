@@ -22,6 +22,27 @@ that differs between platforms:
 
 See [platform differences](/reference/platforms) for why.
 
+## The `/etc/hosts` line (macOS)
+
+ssm writes exactly one line per database, tagged so it can find it again:
+
+```
+127.0.0.1 sc-staging-adam-rds.tunnel # ssm-tunnel
+```
+
+- **Only that tagged line is ever removed.** Every other entry is left
+  byte-for-byte as it was, including lines that look similar, such as
+  `…-rds.tunnel.local`.
+- **A line you wrote yourself is yours.** If `/etc/hosts` already maps the name
+  to `127.0.0.1`, ssm adds nothing, and removes nothing when the tunnel closes.
+- **Parallel tunnels share the line.** Each running `ssm db` holds a lease in
+  `~/.ssm/tunnels/`, and the line goes when the **last** tunnel using it closes.
+  Running two at once, to the same database or to different ones, never pulls a
+  hostname out from under the other.
+- A tunnel killed outright (`kill -9`, a crashed terminal) leaves its line and
+  lease behind. The next `ssm db` for that database notices the lease is dead
+  and cleans up after it.
+
 It works with PostgreSQL, MySQL and any other engine, since the tunnel only
 forwards the port. Because the port stays the same between runs, you configure
 your DB client once.
