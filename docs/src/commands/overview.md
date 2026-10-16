@@ -37,35 +37,44 @@ has:
 
 ```sh
 ssm ssh                                   # fully interactive
-ssm ssh --env staging                     # skips the account menu
-ssm ssh --env staging --app adam          # no prompts at all if the app has one instance
-ssm ssh --env staging --app adam --container php-fpm
-ssm db  --env staging --app adam --db sc-staging-adam-rds
-ssm pod --env staging -n default --pod api-7d9f
+ssm ssh --account staging                 # skips the account menu
+ssm ssh -e staging --env production       # only apps tagged Environment=production
+ssm ssh -e staging --app adam             # no prompts at all if the app has one instance
+ssm ssh -e staging --app adam --container php-fpm
+ssm db  -e staging --app adam --db sc-staging-adam-rds
+ssm pod -e staging -n default --pod api-7d9f
 ```
 
-| Command  | Flags                                                                                                     |
-| -------- | --------------------------------------------------------------------------------------------------------- |
-| all      | `--env\|-e <name>` (alias `--account`), `--help\|-h`                                                      |
-| `ssh`    | `--app <name>`, `--type ec2\|ecs`, `--instance <id\|Name>`, `--container <name>`, `--task <id>`, `--host` |
-| `db`     | `--app <name>`, `--db <identifier>`, `--instance <id\|Name>`                                              |
-| `pod`    | `--cluster <name>`, `--namespace\|-n <ns>`, `--pod <name>`, `--container\|-c <name>`                      |
-| `config` | see [ssm config](/commands/config)                                                                        |
+| Command  | Flags                                                                                                                     |
+| -------- | ------------------------------------------------------------------------------------------------------------------------- |
+| all      | `--account\|-e <name>`, `--help\|-h`                                                                                      |
+| `ssh`    | `--env <name>`, `--app <name>`, `--type ec2\|ecs`, `--instance <id\|Name>`, `--container <name>`, `--task <id>`, `--host` |
+| `db`     | `--env <name>`, `--app <name>`, `--db <identifier>`, `--instance <id\|Name>`                                              |
+| `pod`    | `--cluster <name>`, `--namespace\|-n <ns>`, `--pod <name>`, `--container\|-c <name>`                                      |
+| `config` | see [ssm config](/commands/config)                                                                                        |
 
 `--flag value` and `--flag=value` both work. `ssm <command> --help` prints that
 command's flags.
+
+`--account` names an account in `~/.ssm/config.json`. `--env` is the
+`Environment` tag on the instances, ECS services and databases, and `-` stands
+for "no Environment tag". See [environments](/commands/ssh#environments).
 
 A value that doesn't exist is an error listing the valid ones, never a
 re-prompt, so a fully flagged command can't stall waiting for input:
 
 ```txt
-$ ssm ssh --env staging --app adm
+$ ssm ssh --account staging --app adm
 Error: no app 'adm' in account staging.
 Available:
-  adam
-  eva
-  hub
+  [production] adam
+  [staging] adam
+  [staging] hub
 ```
+
+The one menu a flag can still open is the choice between environments: an
+`--app adam` that runs in several opens the menu on just its rows. Add `--env`
+to settle it.
 
 Instances match on either their id or their `Name` tag, so
 `--instance i-0abc123` and `--instance web-01` both work. If `--container`

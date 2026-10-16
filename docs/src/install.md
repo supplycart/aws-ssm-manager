@@ -67,7 +67,7 @@ at any CMD, PowerShell or Windows Terminal prompt:
 ```powershell
 ssm                 # pick what to do from a menu
 ssm config add      # add your first AWS account
-ssm ssh --env staging --app adam
+ssm ssh --account staging --app adam
 ```
 
 `ssm.cmd` is what makes the bare word `ssm` work: `.ps1` is not in `PATHEXT`,

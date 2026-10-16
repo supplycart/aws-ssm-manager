@@ -18,7 +18,7 @@ ssm config
 `add` asks for:
 
 - **Account name**: your label for the AWS account, such as `staging`. It is
-  the key in `~/.ssm/config.json`, and what you pass as `--env`.
+  the key in `~/.ssm/config.json`, and what you pass as `--account` (or `-e`).
 - **AWS CLI profile**: the saved access keys in `~/.aws` that ssm calls AWS
   with. Pick one you already have, or type a new name to create it.
 - **AWS region**: pick it from a list. Type a city, such as `singapore`, to

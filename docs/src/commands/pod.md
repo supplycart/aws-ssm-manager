@@ -14,10 +14,10 @@ description: Shell into a container in an EKS pod.
 
 ## Flags
 
-`--env`, `--cluster`, `--namespace`/`-n`, `--pod`, `--container`/`-c`.
+`--account`/`-e`, `--cluster`, `--namespace`/`-n`, `--pod`, `--container`/`-c`.
 
 ```sh
-ssm pod --env staging -n default --pod api-7d9f
+ssm pod --account staging -n default --pod api-7d9f
 ```
 
 ## How it connects

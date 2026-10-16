@@ -21,39 +21,59 @@ fi
 case "$1 $2" in
   'ec2 describe-instances')
     # list_apps filters on instance state only; list_instances adds a tag
-    # filter, and that is what tells the two calls apart.
+    # filter, and that is what tells the two calls apart. Every row carries the
+    # Environment tag last, None where an instance has none.
     if [[ "$all" == *'Name=tag:App'* ]]; then
       app=$(printf '%s\n' "$all" | sed -n 's/.*Name=tag:App,Values=\([^ ]*\).*/\1/p')
       case "$app" in
-        adam) printf 'i-0adam000000000001\tadam-web-1\n' ;;
-        beatrice)
-          printf 'i-0bea000000000001\tbea-web-1\n'
-          printf 'i-0bea000000000002\tbea-web-2\n'
+        # The same app in two environments: picking one must never reach the
+        # other's instance.
+        adam)
+          printf 'i-0adam000000000009\tadam-prod-1\tproduction\n'
+          printf 'i-0adam000000000001\tadam-web-1\tstaging\n'
           ;;
-        # An app with instances but no RDS behind it.
-        charlie) printf 'i-0cha000000000001\tcha-web-1\n' ;;
+        beatrice)
+          printf 'i-0bea000000000001\tbea-web-1\tstaging\n'
+          printf 'i-0bea000000000002\tbea-web-2\tstaging\n'
+          ;;
+        # An app with instances but no RDS behind it, and no Environment tag.
+        charlie) printf 'i-0cha000000000001\tcha-web-1\tNone\n' ;;
       esac
     else
-      # One line, tab-separated, with a None in it: what --output text gives
-      # for several apps, and what has to be split into names.
-      printf 'adam\tbeatrice\tcharlie\tNone\n'
+      # One "Environment<TAB>App" row per instance: what --output text gives
+      # for a list of pairs. None where a tag is missing, duplicates where an
+      # app has several instances, and an instance with no App tag at all.
+      printf 'staging\tadam\n'
+      printf 'production\tadam\n'
+      printf 'staging\tbeatrice\n'
+      printf 'staging\tbeatrice\n'
+      printf 'None\tcharlie\n'
+      printf 'staging\tNone\n'
     fi
     ;;
   'rds describe-db-instances')
     app=$(printf '%s\n' "$all" | sed -n "s/.*Value=='\([^']*\)'.*/\1/p")
     case "$app" in
-      adam) printf 'adam-db\tadam-db.rds.amazonaws.com\t5432\n' ;;
+      adam)
+        printf 'adam-prod-db\tadam-prod-db.rds.amazonaws.com\t5432\tproduction\n'
+        printf 'adam-db\tadam-db.rds.amazonaws.com\t5432\tstaging\n'
+        ;;
       beatrice)
-        printf 'bea-db\tbea-db.rds.amazonaws.com\t5432\n'
-        printf 'bea-replica\tbea-replica.rds.amazonaws.com\t5432\n'
+        printf 'bea-db\tbea-db.rds.amazonaws.com\t5432\tstaging\n'
+        printf 'bea-replica\tbea-replica.rds.amazonaws.com\t5432\tstaging\n'
         ;;
     esac
     ;;
-  # No ECS and no EKS in the fixture account: both are additive, and an empty
-  # answer is the shape a plain EC2 account gives.
+  'resourcegroupstaggingapi get-resources')
+    # dora runs on ECS only, in two environments: "ARN<TAB>App<TAB>Environment".
+    printf 'arn:aws:ecs:ap-southeast-5:111122223333:service/apps/dora-stg\tdora\tstaging\n'
+    printf 'arn:aws:ecs:ap-southeast-5:111122223333:service/apps/dora-prd\tdora\tproduction\n'
+    ;;
+  # No EKS in the fixture account, and dora has no running tasks: an empty
+  # answer is the shape a quiet account gives.
   'ecs list-clusters' | 'ecs list-services' | 'ecs describe-services' | \
     'ecs list-container-instances' | 'ecs describe-tasks' | 'ecs list-tasks' | \
-    'resourcegroupstaggingapi get-resources' | 'eks list-clusters') ;;
+    'eks list-clusters') ;;
   'ssm start-session')
     # The real one hands over an interactive session; the tests only need to
     # know it was reached, and with which target.

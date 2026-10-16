@@ -42,11 +42,11 @@ $SSM_CDN_BASE = 'https://cdn.supplycart.my/shells/aws-ssm-manager'
 # Adding a flag means editing this table, ssm.sh, and commands.manifest.
 # ---------------------------------------------------------------------------
 $SSM_COMMANDS = [ordered]@{
-    ssh       = @{ Value = '--env --app --type --instance --container --task'; Bool = '--host' }
-    pod       = @{ Value = '--env --cluster --namespace --pod --container'; Bool = '' }
-    db        = @{ Value = '--env --app --db --instance'; Bool = '' }
+    ssh       = @{ Value = '--account --env --app --type --instance --container --task'; Bool = '--host' }
+    pod       = @{ Value = '--account --cluster --namespace --pod --container'; Bool = '' }
+    db        = @{ Value = '--account --env --app --db --instance'; Bool = '' }
     config    = @{
-        Value = '--env --name --profile --region --access-key --secret-key --db --port'
+        Value = '--account --name --profile --region --access-key --secret-key --db --port'
         Bool  = '--skip-credentials --force --yes --delete-profile'
     }
     update    = @{ Value = ''; Bool = '' }
@@ -194,7 +194,7 @@ function Get-SsmAccountList {
 # Every flag the script knows about, in any command. Read-SsmArgs clears all of
 # them on entry so a second call in the same session starts clean.
 $ALL_ARG_FLAGS = @(
-    'env', 'app', 'type', 'instance', 'container', 'task', 'host', 'db', 'cluster',
+    'account', 'env', 'app', 'type', 'instance', 'container', 'task', 'host', 'db', 'cluster',
     'namespace', 'pod', 'profile', 'region', 'access-key', 'secret-key',
     'skip-credentials', 'yes', 'delete-profile', 'name', 'port', 'force', 'purge',
     'with-deps'
@@ -213,8 +213,7 @@ function Get-SsmArgVarName {
 function ConvertTo-SsmCanonicalFlag {
     param([string]$Flag)
     switch -CaseSensitive ($Flag) {
-        '-e' { return '--env' }
-        '--account' { return '--env' }
+        '-e' { return '--account' }
         '-n' { return '--namespace' }
         '-c' { return '--container' }
         '-h' { return '--help' }
@@ -808,43 +807,96 @@ function Split-SsmTextRows {
     return , ([string[]]@($Lines | Where-Object { $_ -ne '' }))
 }
 
-# bash: list_apps (ssm.sh:320)
+# An app is listed once per Environment tag it runs under, as "[<env>] <app>".
+# Resources with no Environment tag are "[-] <app>", and "-" is how --env and
+# the lookups below name that.
+$SSM_APP_NO_ENV = '-'
+
+# A missing tag comes back from `--output text` as None.
+function ConvertTo-SsmEnvName {
+    param([string]$Tag)
+    if (-not $Tag -or $Tag -ceq 'None') { return $script:SSM_APP_NO_ENV }
+    return $Tag
+}
+
+# bash: app_label_env (ssm.sh:365)
+# The two halves of an "[<env>] <app>" label. The environment runs up to the
+# first "] ", so the app name after it may contain anything.
+function Get-SsmLabelEnv {
+    param([string]$Label)
+    $rest = if ($Label.StartsWith('[')) { $Label.Substring(1) } else { $Label }
+    $i = $rest.IndexOf('] ', [System.StringComparison]::Ordinal)
+    if ($i -lt 0) { return $rest }
+    return $rest.Substring(0, $i)
+}
+
+# bash: app_label_app (ssm.sh:370)
+function Get-SsmLabelApp {
+    param([string]$Label)
+    $i = $Label.IndexOf('] ', [System.StringComparison]::Ordinal)
+    if ($i -lt 0) { return $Label }
+    return $Label.Substring($i + 2)
+}
+
+# bash: app_labels_from_rows (ssm.sh:376)
+# Reads "env<TAB>app" rows and returns a label for each one with an App tag.
+function ConvertTo-SsmAppLabels {
+    param([string[]]$Lines)
+    $labels = foreach ($line in $Lines) {
+        $c = $line -split "`t"
+        if ($c.Count -lt 2 -or -not $c[1] -or $c[1] -ceq 'None') { continue }
+        '[' + (ConvertTo-SsmEnvName $c[0]) + '] ' + $c[1]
+    }
+    return , ([string[]]@($labels))
+}
+
+# bash: list_apps (ssm.sh:384)
 function Get-SsmApps {
     param([string]$Profile, [string]$Region)
     $out = Invoke-SsmAws ec2 describe-instances `
         --profile $Profile --region $Region `
         --filters 'Name=instance-state-name,Values=running' `
-        --query 'Reservations[].Instances[].Tags[?Key==`App`].Value[]' `
+        --query 'Reservations[].Instances[].[Tags[?Key==`Environment`].Value|[0], Tags[?Key==`App`].Value|[0]]' `
         --output text
-    $names = foreach ($line in $out) {
-        foreach ($name in ($line -split "`t")) {
-            if ($name -and $name -cne 'None') { $name }
-        }
-    }
-    return , ([string[]]([System.Linq.Enumerable]::OrderBy(
-                [string[]]@($names | Sort-Object -Unique),
-                [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal)))
+    return ConvertTo-SsmAppLabels @($out)
 }
 
-# bash: list_instances (ssm.sh:330)
+# bash: filter_env_column (ssm.sh:396)
+# Keeps the rows whose last field is the Environment tag -Environment ("-" for
+# none) and returns them without that field.
+function Select-SsmEnvRows {
+    param([string[]]$Lines, [string]$Environment)
+    $rows = foreach ($line in $Lines) {
+        if (-not $line) { continue }
+        $c = $line -split "`t"
+        if ($c.Count -lt 2) { continue }
+        if ((ConvertTo-SsmEnvName $c[-1]) -cne $Environment) { continue }
+        $c[0..($c.Count - 2)] -join "`t"
+    }
+    return , ([string[]]@($rows))
+}
+
+# bash: list_instances (ssm.sh:409)
+# Filtered on the Environment tag after the call rather than with a
+# tag:Environment filter, because a filter cannot ask for "no such tag".
 function Get-SsmInstances {
-    param([string]$Profile, [string]$Region, [string]$App)
+    param([string]$Profile, [string]$Region, [string]$App, [string]$Environment)
     $out = Invoke-SsmAws ec2 describe-instances `
         --profile $Profile --region $Region `
         --filters "Name=tag:App,Values=$App" 'Name=instance-state-name,Values=running' `
-        --query 'Reservations[].Instances[].[InstanceId, Tags[?Key==`Name`].Value|[0]]' `
+        --query 'Reservations[].Instances[].[InstanceId, Tags[?Key==`Name`].Value|[0], Tags[?Key==`Environment`].Value|[0]]' `
         --output text
-    return Split-SsmTextRows $out
+    return Select-SsmEnvRows @($out) $Environment
 }
 
-# bash: list_rds_instances (ssm.sh:340)
+# bash: list_rds_instances (ssm.sh:419)
 function Get-SsmRdsInstances {
-    param([string]$Profile, [string]$Region, [string]$App)
+    param([string]$Profile, [string]$Region, [string]$App, [string]$Environment)
     $out = Invoke-SsmAws rds describe-db-instances `
         --profile $Profile --region $Region `
-        --query "DBInstances[?TagList[?Key=='App' && Value=='$App']].[DBInstanceIdentifier, Endpoint.Address, Endpoint.Port]" `
+        --query "DBInstances[?TagList[?Key=='App' && Value=='$App']].[DBInstanceIdentifier, Endpoint.Address, Endpoint.Port, TagList[?Key=='Environment'].Value|[0]]" `
         --output text
-    return Split-SsmTextRows $out
+    return Select-SsmEnvRows @($out) $Environment
 }
 
 # ---------------------------------------------------------------------------
@@ -852,8 +904,8 @@ function Get-SsmRdsInstances {
 # path behaves exactly as before.
 # ---------------------------------------------------------------------------
 
-# One "cluster<TAB>service<TAB>app" row per App-tagged ECS service, populated
-# once per run.
+# One "cluster<TAB>service<TAB>app<TAB>env" row per App-tagged ECS service,
+# env "-" when the service has no Environment tag. Populated once per run.
 $script:ECS_SERVICES = @()
 $script:ECS_DISCOVERY_DONE = $false
 
@@ -877,13 +929,14 @@ function Get-SsmEcsServicesSlow {
             $batch = $services[$i..([Math]::Min($i + 9, $services.Count - 1))]
             $out = Invoke-SsmAws -Quiet ecs describe-services --profile $Profile --region $Region `
                 --cluster $cluster --services @batch --include TAGS `
-                --query 'services[].[clusterArn, serviceName, tags[?key==`App`].value|[0]]' `
+                --query 'services[].[clusterArn, serviceName, tags[?key==`App`].value|[0], tags[?key==`Environment`].value|[0]]' `
                 --output text
             foreach ($line in $out) {
                 $c = $line -split "`t"
                 if ($c.Count -lt 3 -or -not $c[2] -or $c[2] -ceq 'None') { continue }
                 $parts = $c[0] -split '/'
-                $rows.Add("$($parts[-1])`t$($c[1])`t$($c[2])")
+                $tag = if ($c.Count -ge 4) { $c[3] } else { '' }
+                $rows.Add("$($parts[-1])`t$($c[1])`t$($c[2])`t$(ConvertTo-SsmEnvName $tag)")
             }
         }
     }
@@ -902,7 +955,7 @@ function Get-SsmEcsServices {
     $raw = Invoke-SsmAws -Quiet resourcegroupstaggingapi get-resources `
         --profile $Profile --region $Region `
         --tag-filters Key=App --resource-type-filters ecs:service `
-        --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`App`].Value|[0]]' `
+        --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`App`].Value|[0], Tags[?Key==`Environment`].Value|[0]]' `
         --output text
 
     if ($LASTEXITCODE -eq 0) {
@@ -910,7 +963,8 @@ function Get-SsmEcsServices {
             $c = $line -split "`t"
             if ($c.Count -lt 2 -or -not $c[1] -or $c[1] -ceq 'None') { continue }
             $p = $c[0] -split '/'
-            if ($p.Count -ge 3) { "$($p[-2])`t$($p[-1])`t$($c[1])" }
+            $tag = if ($c.Count -ge 3) { $c[2] } else { '' }
+            if ($p.Count -ge 3) { "$($p[-2])`t$($p[-1])`t$($c[1])`t$(ConvertTo-SsmEnvName $tag)" }
         }
         $script:ECS_SERVICES = [string[]]@($rows)
         return
@@ -926,19 +980,19 @@ function Get-SsmEcsServices {
 
 # bash: list_ecs_apps (ssm.sh:432)
 function Get-SsmEcsApps {
-    $apps = foreach ($row in $script:ECS_SERVICES) {
+    $pairs = foreach ($row in $script:ECS_SERVICES) {
         $c = $row -split "`t"
-        if ($c.Count -ge 3) { $c[2] }
+        if ($c.Count -ge 4) { "$($c[3])`t$($c[2])" }
     }
-    return , ([string[]]@($apps))
+    return ConvertTo-SsmAppLabels @($pairs)
 }
 
 # bash: ecs_services_for_app (ssm.sh:437)
 function Get-SsmEcsServicesForApp {
-    param([string]$App)
+    param([string]$App, [string]$Environment)
     $rows = foreach ($row in $script:ECS_SERVICES) {
         $c = $row -split "`t"
-        if ($c.Count -ge 3 -and $c[2] -ceq $App) { "$($c[0])`t$($c[1])" }
+        if ($c.Count -ge 4 -and $c[2] -ceq $App -and $c[3] -ceq $Environment) { "$($c[0])`t$($c[1])" }
     }
     return , ([string[]]@($rows))
 }
@@ -1085,11 +1139,11 @@ function Invoke-SsmEcsPickAndExec {
 # bash: ssh_ecs_app (ssm.sh:575)
 # Fargate / service path: every running task of the app's ECS services.
 function Invoke-SsmSshEcsApp {
-    param([string]$Profile, [string]$Region, [string]$App)
-    Write-SsmErr "Fetching ECS tasks for $App..."
+    param([string]$Profile, [string]$Region, [string]$App, [string]$Environment)
+    Write-SsmErr "Fetching ECS tasks for [$Environment] $App..."
 
     $rows = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in (Get-SsmEcsServicesForApp $App)) {
+    foreach ($line in (Get-SsmEcsServicesForApp $App $Environment)) {
         $c = $line -split "`t"
         if ($c.Count -lt 2 -or -not $c[0] -or -not $c[1]) { continue }
         $tasks = @((Invoke-SsmAws -Quiet ecs list-tasks --profile $Profile --region $Region `
@@ -1351,8 +1405,11 @@ function Invoke-SsmProfileCreate {
 }
 
 # bash: pick_app (ssm.sh:666)
+# Returns the chosen "[<env>] <app>" label. -WantedEnv keeps only that
+# environment's rows. -Wanted is a whole label or a bare app name; a bare name
+# found in several environments opens the menu on just those rows.
 function Select-SsmApp {
-    param([string]$Wanted, [string]$Account, [string]$Profile, [string]$Region)
+    param([string]$Wanted, [string]$WantedEnv, [string]$Account, [string]$Profile, [string]$Region)
     Write-SsmErr 'Fetching apps...'
 
     # No @() around either call. Both return `, ([string[]]...)` so that a
@@ -1361,30 +1418,61 @@ function Select-SsmApp {
     # "adam beatrice charlie" item, so --app never matched and the menu drew
     # one unusable row. Parentheses unroll the wrapper; + concatenates.
     $all = [string[]]@((Get-SsmApps $Profile $Region) + (Get-SsmEcsApps))
-    $apps = [string[]]([System.Linq.Enumerable]::OrderBy(
-            [string[]]@($all | Where-Object { $_ -and $_ -cne 'None' } | Sort-Object -Unique),
-            [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal))
+    # Distinct and sorted ordinally, as bash's `LC_ALL=C sort -u`: Sort-Object
+    # -Unique compares case-insensitively and would fold two labels into one.
+    $apps = [string[]]@([System.Linq.Enumerable]::Distinct([System.Linq.Enumerable]::OrderBy(
+                [string[]]@($all | Where-Object { $_ }),
+                [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal),
+            [System.StringComparer]::Ordinal))
 
     if (-not $apps -or $apps.Count -eq 0) {
         Write-SsmErr 'No running instances or ECS services with an App tag found.'
         return $null
     }
+
+    if ($WantedEnv) {
+        $kept = [string[]]@($apps | Where-Object { (Get-SsmLabelEnv $_) -ceq $WantedEnv })
+        if ($kept.Count -eq 0) {
+            Write-SsmErr "Error: no environment '$WantedEnv' in account $Account."
+            Write-SsmErr 'Available:'
+            $envs = [string[]]@($apps | ForEach-Object { Get-SsmLabelEnv $_ })
+            $sorted = [System.Linq.Enumerable]::Distinct([System.Linq.Enumerable]::OrderBy(
+                    $envs, [Func[string, string]] { param($s) $s }, [System.StringComparer]::Ordinal),
+                [System.StringComparer]::Ordinal)
+            foreach ($e in $sorted) { Write-SsmErr "  $e" }
+            return $null
+        }
+        $apps = $kept
+    }
+
+    # A bare app name: settled if it runs in one environment, a menu of just its
+    # environments if it runs in several. A full label is matched as it stands.
+    if ($Wanted -and -not $Wanted.StartsWith('[')) {
+        $named = [string[]]@($apps | Where-Object { (Get-SsmLabelApp $_) -ceq $Wanted })
+        if ($named.Count -eq 1) {
+            $Wanted = $named[0]
+        } elseif ($named.Count -gt 1) {
+            return Resolve-SsmSelection '' 'app' "account $Account" 'Select application:' '1' '' $named
+        }
+    }
+
     return Resolve-SsmSelection $Wanted 'app' "account $Account" 'Select application:' '1' '' $apps
 }
 
 # bash: pick_instance (ssm.sh:683)
 function Select-SsmInstance {
-    param([string]$Wanted, [string]$Profile, [string]$Region, [string]$App)
-    Write-SsmErr "Fetching instances for $App..."
+    param([string]$Wanted, [string]$Profile, [string]$Region, [string]$App, [string]$Environment)
+    $label = "[$Environment] $App"
+    Write-SsmErr "Fetching instances for $label..."
 
-    $rows = Get-SsmInstances $Profile $Region $App
+    $rows = Get-SsmInstances $Profile $Region $App $Environment
     if (-not $rows -or $rows.Count -eq 0) {
-        Write-SsmErr "No running instances found for app: $App"
+        Write-SsmErr "No running instances found for app: $label"
         return $null
     }
 
     # Matched on the instance id or on its Name tag, whichever the user typed.
-    $selected = Resolve-SsmSelection $Wanted 'instance' "app $App" 'Select instance:' '1,2' 'auto' $rows
+    $selected = Resolve-SsmSelection $Wanted 'instance' "app $label" 'Select instance:' '1,2' 'auto' $rows
     if ($null -eq $selected) { return $null }
     if (-not $selected) { return '' }
     # Split on the tab, not on whitespace: a Name tag can contain spaces, which
@@ -1433,7 +1521,7 @@ function Invoke-SsmSsh {
         Exit-Ssm 1
     }
 
-    $account = Select-SsmAccount $script:ARG_ENV
+    $account = Select-SsmAccount $script:ARG_ACCOUNT
     if ($null -eq $account) { Exit-Ssm 1 }
     if (-not $account) { Exit-Ssm 0 }
     $profile = Get-SsmConfigValue $account 'profile'
@@ -1441,25 +1529,27 @@ function Invoke-SsmSsh {
 
     Get-SsmEcsServices $profile $region
 
-    $app = Select-SsmApp $script:ARG_APP $account $profile $region
-    if ($null -eq $app) { Exit-Ssm 1 }
-    if (-not $app) { Exit-Ssm 0 }
+    $label = Select-SsmApp $script:ARG_APP $script:ARG_ENV $account $profile $region
+    if ($null -eq $label) { Exit-Ssm 1 }
+    if (-not $label) { Exit-Ssm 0 }
+    $app = Get-SsmLabelApp $label
+    $appEnv = Get-SsmLabelEnv $label
 
     # If the app also has ECS services, offer the choice. An app backed only by
     # EC2 skips this entirely and follows the original flow.
-    if ((Get-SsmEcsServicesForApp $app).Count) {
+    if ((Get-SsmEcsServicesForApp $app $appEnv).Count) {
         $target = 'ECS task'
-        if ((Get-SsmInstances $profile $region $app).Count) {
+        if ((Get-SsmInstances $profile $region $app $appEnv).Count) {
             $target = Select-SsmSshTarget
             if (-not $target) { Exit-Ssm 0 }
         }
         if ($target -ceq 'ECS task') {
-            Invoke-SsmSshEcsApp $profile $region $app
+            Invoke-SsmSshEcsApp $profile $region $app $appEnv
             return
         }
     }
 
-    $instanceId = Select-SsmInstance $script:ARG_INSTANCE $profile $region $app
+    $instanceId = Select-SsmInstance $script:ARG_INSTANCE $profile $region $app $appEnv
     if ($null -eq $instanceId) { Exit-Ssm 1 }
     if (-not $instanceId) { Exit-Ssm 0 }
 
@@ -1654,7 +1744,7 @@ function Invoke-SsmPod {
 
     Assert-SsmKubectl
 
-    $account = Select-SsmAccount $script:ARG_ENV
+    $account = Select-SsmAccount $script:ARG_ACCOUNT
     if ($null -eq $account) { Exit-Ssm 1 }
     if (-not $account) { Exit-Ssm 0 }
     $profile = Get-SsmConfigValue $account 'profile'
@@ -1698,23 +1788,25 @@ function Invoke-SsmDb {
     param([Parameter(ValueFromRemainingArguments)][string[]]$Rest)
     if (-not (Read-SsmCommandArgs 'db' $Rest)) { Exit-Ssm 1 }
 
-    $account = Select-SsmAccount $script:ARG_ENV
+    $account = Select-SsmAccount $script:ARG_ACCOUNT
     if ($null -eq $account) { Exit-Ssm 1 }
     if (-not $account) { Exit-Ssm 0 }
     $profile = Get-SsmConfigValue $account 'profile'
     $region = Get-SsmConfigValue $account 'region'
-    $app = Select-SsmApp $script:ARG_APP $account $profile $region
-    if ($null -eq $app) { Exit-Ssm 1 }
-    if (-not $app) { Exit-Ssm 0 }
+    $label = Select-SsmApp $script:ARG_APP $script:ARG_ENV $account $profile $region
+    if ($null -eq $label) { Exit-Ssm 1 }
+    if (-not $label) { Exit-Ssm 0 }
+    $app = Get-SsmLabelApp $label
+    $appEnv = Get-SsmLabelEnv $label
 
-    Write-SsmErr "Fetching RDS instances for $app..."
-    $rdsRows = Get-SsmRdsInstances $profile $region $app
+    Write-SsmErr "Fetching RDS instances for $label..."
+    $rdsRows = Get-SsmRdsInstances $profile $region $app $appEnv
     if (-not $rdsRows -or $rdsRows.Count -eq 0) {
-        Write-SsmErr "No RDS instances found for app: $app"
+        Write-SsmErr "No RDS instances found for app: $label"
         Exit-Ssm 1
     }
 
-    $selectedRds = Resolve-SsmSelection $script:ARG_DB 'database' "app $app" `
+    $selectedRds = Resolve-SsmSelection $script:ARG_DB 'database' "app $label" `
         'Select database:' '1' 'auto' $rdsRows
     if ($null -eq $selectedRds) { Exit-Ssm 1 }
     if (-not $selectedRds) { Exit-Ssm 0 }
@@ -1723,16 +1815,16 @@ function Invoke-SsmDb {
     $dbIdentifier = $c[0]; $rdsHost = $c[1]; $rdsPort = $c[2]
     $localPort = Get-SsmDbPort $account $dbIdentifier
 
-    Write-SsmErr "Fetching jump-host for $app..."
+    Write-SsmErr "Fetching jump-host for $label..."
     if ($script:ARG_INSTANCE) {
-        $instanceId = Select-SsmInstance $script:ARG_INSTANCE $profile $region $app
+        $instanceId = Select-SsmInstance $script:ARG_INSTANCE $profile $region $app $appEnv
         if ($null -eq $instanceId) { Exit-Ssm 1 }
     } else {
-        $rows = Get-SsmInstances $profile $region $app
+        $rows = Get-SsmInstances $profile $region $app $appEnv
         $instanceId = if ($rows.Count) { ($rows[0] -split "`t")[0] } else { '' }
     }
     if (-not $instanceId -or $instanceId -ceq 'None') {
-        Write-SsmErr "No running EC2 instances found for app: $app"
+        Write-SsmErr "No running EC2 instances found for app: $label"
         Exit-Ssm 1
     }
 
@@ -1918,10 +2010,10 @@ function Get-SsmAwsConfigValue {
 # bash: config_view (ssm.sh:1201)
 function Show-SsmConfig {
     $config = Get-SsmConfig
-    if ($script:ARG_ENV) {
-        if ($null -eq (Select-SsmAccount $script:ARG_ENV)) { Exit-Ssm 1 }
-        Write-Output ((Get-SsmMember $config $script:ARG_ENV) | ConvertTo-Json -Depth 100)
-        $accounts = @($script:ARG_ENV)
+    if ($script:ARG_ACCOUNT) {
+        if ($null -eq (Select-SsmAccount $script:ARG_ACCOUNT)) { Exit-Ssm 1 }
+        Write-Output ((Get-SsmMember $config $script:ARG_ACCOUNT) | ConvertTo-Json -Depth 100)
+        $accounts = @($script:ARG_ACCOUNT)
     } else {
         Write-Output ($config | ConvertTo-Json -Depth 100)
         $accounts = Get-SsmAccountList
@@ -1941,7 +2033,7 @@ function Show-SsmConfig {
 
 # bash: config_add (ssm.sh:1226)
 function Add-SsmAccount {
-    $name = $script:ARG_ENV
+    $name = $script:ARG_ACCOUNT
     if (-not $name) { $name = Read-SsmLine 'Account name (your label for this AWS account in ssm, e.g. staging): ' }
     if (-not $name) { Write-SsmErr 'Aborted.'; return $false }
 
@@ -1950,7 +2042,7 @@ function Add-SsmAccount {
     if (Test-SsmAccountExists $name) {
         if (-not $script:ARG_FORCE) {
             Write-SsmErr "Error: account '$name' already exists in $script:CONFIG_FILE."
-            Write-SsmErr "Use 'ssm config edit --env $name' to change it, or --force to replace it."
+            Write-SsmErr "Use 'ssm config edit --account $name' to change it, or --force to replace it."
             return $false
         }
         Write-Host "Replacing existing account '$name'."
@@ -2029,7 +2121,7 @@ function Remove-SsmAwsProfile {
 
 # bash: config_delete (ssm.sh:1276)
 function Remove-SsmAccount {
-    $account = Select-SsmAccount $script:ARG_ENV
+    $account = Select-SsmAccount $script:ARG_ACCOUNT
     if ($null -eq $account) { Exit-Ssm 1 }
     if (-not $account) { Exit-Ssm 0 }
 
@@ -2070,7 +2162,7 @@ function Remove-SsmAccount {
 
 # bash: config_edit (ssm.sh:1334)
 function Edit-SsmAccount {
-    $account = Select-SsmAccount $script:ARG_ENV
+    $account = Select-SsmAccount $script:ARG_ACCOUNT
     if ($null -eq $account) { Exit-Ssm 1 }
     if (-not $account) { Exit-Ssm 0 }
 
@@ -2802,11 +2894,12 @@ function Get-SsmUsage {
 ssm ssh — Shell into an EC2 instance, an ECS container instance, or an
           ECS/Fargate container.
 
-  ssm ssh [--env <name>] [--app <name>] [--type ec2|ecs]
+  ssm ssh [--account <name>] [--env <name>] [--app <name>] [--type ec2|ecs]
           [--instance <id|Name>] [--container <name>] [--task <id>] [--host]
 
-  --env, -e     account in %USERPROFILE%\.ssm\config.json    (default: pick from a menu)
-  --app         App tag                          (default: pick from a menu)
+  --account, -e account in %USERPROFILE%\.ssm\config.json    (default: pick from a menu)
+  --env         Environment tag, "-" for none    (default: every environment)
+  --app         App tag, or "[<env>] <app>"      (default: pick from a menu)
   --type        ec2 or ecs, when the app has both
   --instance    EC2 instance id or Name tag; implies --type ec2
   --container   container name; implies --type ecs, or the container shell
@@ -2816,24 +2909,32 @@ ssm ssh — Shell into an EC2 instance, an ECS container instance, or an
 
 EXAMPLES
   ssm ssh                                       fully interactive
-  ssm ssh --env staging                         skips the account menu
-  ssm ssh --env staging --app adam              no prompts if the app has one instance
-  ssm ssh --env staging --instance web-01       match an EC2 Name tag
-  ssm ssh --env staging --instance i-0abc123    or an instance id
-  ssm ssh --env staging --app adam --container php-fpm
-  ssm ssh --env staging --app adam --container php-fpm --task 7d9f2a
-  ssm ssh --env staging --app adam --type ecs   when the app has both EC2 and ECS
-  ssm ssh --env staging --app adam --host       host shell on an ECS node
+  ssm ssh --account staging                     skips the account menu
+  ssm ssh -e staging --env production           only apps tagged Environment=production
+  ssm ssh -e staging --app adam                 no prompts if the app has one instance
+  ssm ssh -e staging --env production --app adam
+                                                adam's production instances only
+  ssm ssh -e staging --app '[production] adam'  the same, as the menu shows it
+  ssm ssh -e staging --instance web-01          match an EC2 Name tag
+  ssm ssh -e staging --instance i-0abc123       or an instance id
+  ssm ssh -e staging --app adam --container php-fpm
+  ssm ssh -e staging --app adam --container php-fpm --task 7d9f2a
+  ssm ssh -e staging --app adam --type ecs      when the app has both EC2 and ECS
+  ssm ssh -e staging --app adam --host          host shell on an ECS node
+
+The app menu lists each app once per Environment tag, as "[production] adam";
+"[-] adam" is one with no Environment tag. An --app found in several
+environments asks which one, unless --env settles it.
 '@ -split "`n"
         }
         { $_ -ceq 'pod' } {
             return @'
 ssm pod — Shell into an EKS pod via kubectl.
 
-  ssm pod [--env <name>] [--cluster <name>] [--namespace|-n <ns>]
+  ssm pod [--account <name>] [--cluster <name>] [--namespace|-n <ns>]
           [--pod <name>] [--container|-c <name>]
 
-  --env, -e       account in %USERPROFILE%\.ssm\config.json  (default: pick from a menu)
+  --account, -e   account in %USERPROFILE%\.ssm\config.json  (default: pick from a menu)
   --cluster       EKS cluster name
   --namespace, -n Kubernetes namespace
   --pod           pod name (running pods only)
@@ -2841,33 +2942,39 @@ ssm pod — Shell into an EKS pod via kubectl.
 
 EXAMPLES
   ssm pod                                       fully interactive
-  ssm pod --env staging                         skips the account menu
-  ssm pod --env staging --cluster sc-staging-eks
-  ssm pod --env staging -n default              skips the namespace menu
-  ssm pod --env staging -n default --pod api-7d9f
-  ssm pod --env staging -n default --pod api-7d9f -c sidecar
+  ssm pod --account staging                     skips the account menu
+  ssm pod -e staging --cluster sc-staging-eks
+  ssm pod -e staging -n default                 skips the namespace menu
+  ssm pod -e staging -n default --pod api-7d9f
+  ssm pod -e staging -n default --pod api-7d9f -c sidecar
 '@ -split "`n"
         }
         { $_ -ceq 'db' } {
             return @'
 ssm db — Open an RDS tunnel via SSM port forwarding.
 
-  ssm db [--env <name>] [--app <name>] [--db <identifier>] [--instance <id|Name>]
+  ssm db [--account <name>] [--env <name>] [--app <name>] [--db <identifier>]
+         [--instance <id|Name>]
 
-  --env, -e     account in %USERPROFILE%\.ssm\config.json    (default: pick from a menu)
-  --app         App tag                          (default: pick from a menu)
+  --account, -e account in %USERPROFILE%\.ssm\config.json    (default: pick from a menu)
+  --env         Environment tag, "-" for none    (default: every environment)
+  --app         App tag, or "[<env>] <app>"      (default: pick from a menu)
   --db          RDS DBInstanceIdentifier
   --instance    EC2 instance to tunnel through   (default: the first one found)
 
 The local port is assigned on first use and remembered in %USERPROFILE%\.ssm\config.json.
-Change it with `ssm config edit --env <name> --db <id> --port <n>`.
+Change it with `ssm config edit --account <name> --db <id> --port <n>`.
+The database and the instance it tunnels through carry the app's Environment
+tag, so a production database is never reached through a staging instance.
 
 EXAMPLES
   ssm db                                        fully interactive
-  ssm db --env staging                          skips the account menu
-  ssm db --env staging --app adam               no prompts if the app has one database
-  ssm db --env staging --app adam --db sc-staging-adam-rds
-  ssm db --env staging --app adam --db sc-staging-adam-rds --instance web-01
+  ssm db --account staging                      skips the account menu
+  ssm db -e staging --app adam                  no prompts if the app has one database
+  ssm db -e staging --env production --app adam
+                                                adam's production database
+  ssm db -e staging --app adam --db sc-staging-adam-rds
+  ssm db -e staging --app adam --db sc-staging-adam-rds --instance web-01
 '@ -split "`n"
         }
         { $_ -ceq 'config' } {
@@ -2876,15 +2983,17 @@ ssm config — Manage account profiles and AWS CLI credentials.
 
   ssm config [view|add|edit|delete] [flags]      (no action: pick from a menu)
 
-  ssm config view   [--env <name>]
-  ssm config add    --env <name> [--profile <p>] [--region <r>]
+  ssm config view   [--account <name>]
+  ssm config add    --account <name> [--profile <p>] [--region <r>]
                     [--access-key <k>] [--secret-key -] [--skip-credentials]
                     [--force]
-  ssm config edit   --env <name> [--name <new>] [--profile <p>] [--region <r>]
+  ssm config edit   --account <name> [--name <new>] [--profile <p>] [--region <r>]
                     [--access-key <k>] [--secret-key -]
                     [--db <id> --port <n>]
-  ssm config delete --env <name> [--yes] [--delete-profile]
-  ssm config delete --env <name> --db <id> [--yes]
+  ssm config delete --account <name> [--yes] [--delete-profile]
+  ssm config delete --account <name> --db <id> [--yes]
+
+  --account, -e     the account in %USERPROFILE%\.ssm\config.json
 
   --name            rename the account; keeps its region and db ports, and does
                     not touch the AWS CLI profile
@@ -2896,17 +3005,17 @@ ssm config — Manage account profiles and AWS CLI credentials.
 EXAMPLES
   ssm config                                    pick an action from a menu
   ssm config view                               every account
-  ssm config view --env staging                 one account
-  ssm config add --env staging --profile sc-staging --region ap-southeast-5
-  ssm config add --env staging --profile sc-staging --region ap-southeast-5 \
+  ssm config view --account staging             one account
+  ssm config add --account staging --profile sc-staging --region ap-southeast-5
+  ssm config add --account staging --profile sc-staging --region ap-southeast-5 \
     --skip-credentials                          config only, no AWS CLI setup
-  SSM_AWS_SECRET_KEY=... ssm config add --env staging --profile sc-staging \
+  SSM_AWS_SECRET_KEY=... ssm config add --account staging --profile sc-staging \
     --region ap-southeast-5 --access-key AKIA...
-  ssm config edit --env staging --region ap-southeast-1
-  ssm config edit --env staging --name stg      rename the account
-  ssm config edit --env staging --db sc-staging-adam-rds --port 15433
-  ssm config delete --env staging --db sc-staging-adam-rds --yes
-  ssm config delete --env staging --yes --delete-profile
+  ssm config edit -e staging --region ap-southeast-1
+  ssm config edit -e staging --name stg         rename the account
+  ssm config edit -e staging --db sc-staging-adam-rds --port 15433
+  ssm config delete -e staging --db sc-staging-adam-rds --yes
+  ssm config delete -e staging --yes --delete-profile
 
 Never pass a secret as a flag value -- it lands in your shell history. Set
 SSM_AWS_SECRET_KEY=... or use '--secret-key -' to read one line from stdin.
@@ -2972,14 +3081,14 @@ USAGE
   Run `ssm <command> --help` for that command's flags.
 
 FLAGS
-  ssm ssh        [--env <name>] [--app <name>] [--type ec2|ecs]
-                 [--instance <id|Name>] [--container <name>] [--task <id>]
-                 [--host]
-  ssm pod        [--env <name>] [--cluster <name>] [-n <namespace>]
+  ssm ssh        [--account <name>] [--env <name>] [--app <name>]
+                 [--type ec2|ecs] [--instance <id|Name>] [--container <name>]
+                 [--task <id>] [--host]
+  ssm pod        [--account <name>] [--cluster <name>] [-n <namespace>]
                  [--pod <name>] [-c <container>]
-  ssm db         [--env <name>] [--app <name>] [--db <identifier>]
-                 [--instance <id|Name>]
-  ssm config     [view|add|edit|delete] [--env <name>] [--name <new>]
+  ssm db         [--account <name>] [--env <name>] [--app <name>]
+                 [--db <identifier>] [--instance <id|Name>]
+  ssm config     [view|add|edit|delete] [--account <name>] [--name <new>]
                  [--profile <p>] [--region <r>] [--db <id> --port <n>]
                  [--access-key <k>] [--secret-key -] [--skip-credentials]
                  [--force] [--yes] [--delete-profile]
@@ -2987,17 +3096,21 @@ FLAGS
 
 EXAMPLES
   ssm ssh                                     fully interactive, as before
-  ssm ssh --env staging                       skips the account menu
-  ssm ssh --env staging --app adam            no prompts if the app has one instance
-  ssm ssh --env staging --app adam --container php-fpm
-  ssm ssh --env staging --instance web-01     match an EC2 Name tag or id
-  ssm db  --env staging --app adam --db sc-staging-adam-rds
-  ssm pod --env staging -n default --pod api-7d9f
-  ssm config view --env staging
-  ssm config add --env staging --profile sc-staging --region ap-southeast-5
-  ssm config edit --env staging --name stg --region ap-southeast-1
-  ssm config edit --env staging --db sc-staging-adam-rds --port 15433
-  ssm config delete --env staging --yes --delete-profile
+  ssm ssh --account staging                   skips the account menu
+  ssm ssh -e staging --app adam               no prompts if the app has one instance
+  ssm ssh -e staging --env production         only apps tagged Environment=production
+  ssm ssh -e staging --app adam --container php-fpm
+  ssm ssh -e staging --instance web-01        match an EC2 Name tag or id
+  ssm db  -e staging --app adam --db sc-staging-adam-rds
+  ssm pod -e staging -n default --pod api-7d9f
+  ssm config view --account staging
+  ssm config add --account staging --profile sc-staging --region ap-southeast-5
+  ssm config edit -e staging --name stg --region ap-southeast-1
+  ssm config edit -e staging --db sc-staging-adam-rds --port 15433
+  ssm config delete -e staging --yes --delete-profile
+
+  --account (-e) is the account in %USERPROFILE%\.ssm\config.json; --env is the
+  Environment tag on the instances, ECS services and databases.
 
   A value that does not exist is an error listing the valid ones, so a fully
   flagged command never stops to ask a question.

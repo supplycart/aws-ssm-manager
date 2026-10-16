@@ -79,6 +79,14 @@ Attach the following policy to the IAM user or role:
 | ECS services  | `App` | the same app name as its EC2 instances |
 | RDS instances | `App` | the same app name as its EC2 instances |
 
+An `Environment` tag on any of these (e.g. `staging`, `production`) is
+optional. When present, an app is listed once per environment, as
+`[production] adam`, and picking one keeps its instances, ECS services and
+databases apart from every other environment's. Untagged resources are listed
+as `[-] adam`. Tag an app's instances, services and databases alike: an RDS
+database tagged `production` is not found from an app whose instances carry no
+`Environment` tag.
+
 ECS discovery uses the Resource Groups Tagging API (`tag:GetResources`) for
 speed. Without that permission ssm falls back to enumerating clusters and
 services, which is slower but needs no extra IAM.
