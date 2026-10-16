@@ -190,7 +190,7 @@ print_tunnel_banner() {
 
 # Every flag the script knows about, in any command. parse_args clears all of
 # them on entry so a second call in the same shell starts clean.
-ALL_ARG_FLAGS="env app type instance container task host db cluster namespace \
+ALL_ARG_FLAGS="account env app type instance container task host db cluster namespace \
 pod profile region access-key secret-key skip-credentials yes delete-profile \
 name port force purge with-deps"
 
@@ -204,7 +204,7 @@ arg_var() {
 # Short and legacy spellings resolve to one canonical flag.
 normalize_flag() {
   case "$1" in
-    -e|--account) printf '%s' "--env" ;;
+    -e)           printf '%s' "--account" ;;
     -n)           printf '%s' "--namespace" ;;
     -c)           printf '%s' "--container" ;;
     -h)           printf '%s' "--help" ;;
@@ -355,33 +355,74 @@ read_secret_value() {
   printf '%s' "$secret"
 }
 
+# An app is listed once per Environment tag it runs under, as "[<env>] <app>".
+# Resources with no Environment tag are "[-] <app>", and "-" is how --env and
+# the lookups below name that.
+APP_NO_ENV="-"
+
+# The two halves of an "[<env>] <app>" label. The environment runs up to the
+# first "] ", so the app name after it may contain anything.
+app_label_env() {
+  local rest="${1#\[}"
+  printf '%s' "${rest%%] *}"
+}
+
+app_label_app() {
+  printf '%s' "${1#*] }"
+}
+
+# Reads "env<TAB>app" rows, None for a missing tag, and prints a label for each
+# one that has an App tag.
+app_labels_from_rows() {
+  awk -F'\t' -v none="$APP_NO_ENV" '
+    $2 != "" && $2 != "None" {
+      env = ($1 == "" || $1 == "None") ? none : $1
+      print "[" env "] " $2
+    }'
+}
+
 list_apps() {
   local profile="$1" region="$2"
   aws ec2 describe-instances \
     --profile "$profile" \
     --region "$region" \
     --filters "Name=instance-state-name,Values=running" \
-    --query 'Reservations[].Instances[].Tags[?Key==`App`].Value[]' \
-    --output text | tr '\t' '\n' | sort -u | grep -v -e '^$' -e '^None$'
+    --query 'Reservations[].Instances[].[Tags[?Key==`Environment`].Value|[0], Tags[?Key==`App`].Value|[0]]' \
+    --output text | app_labels_from_rows
 }
 
+# Keeps the rows whose last field is the Environment tag <env> ("-" for none)
+# and prints them without that field.
+filter_env_column() {
+  awk -F'\t' -v env="$1" -v none="$APP_NO_ENV" '
+    {
+      tag = ($NF == "" || $NF == "None") ? none : $NF
+      if (tag != env) next
+      row = $1
+      for (i = 2; i < NF; i++) row = row "\t" $i
+      print row
+    }'
+}
+
+# Filtered on the Environment tag after the call rather than with a
+# tag:Environment filter, because a filter cannot ask for "no such tag".
 list_instances() {
-  local profile="$1" region="$2" app="$3"
+  local profile="$1" region="$2" app="$3" env="$4"
   aws ec2 describe-instances \
     --profile "$profile" \
     --region "$region" \
     --filters "Name=tag:App,Values=$app" "Name=instance-state-name,Values=running" \
-    --query 'Reservations[].Instances[].[InstanceId, Tags[?Key==`Name`].Value|[0]]' \
-    --output text
+    --query 'Reservations[].Instances[].[InstanceId, Tags[?Key==`Name`].Value|[0], Tags[?Key==`Environment`].Value|[0]]' \
+    --output text | filter_env_column "$env"
 }
 
 list_rds_instances() {
-  local profile="$1" region="$2" app="$3"
+  local profile="$1" region="$2" app="$3" env="$4"
   aws rds describe-db-instances \
     --profile "$profile" \
     --region "$region" \
-    --query "DBInstances[?TagList[?Key=='App' && Value=='$app']].[DBInstanceIdentifier, Endpoint.Address, Endpoint.Port]" \
-    --output text
+    --query "DBInstances[?TagList[?Key=='App' && Value=='$app']].[DBInstanceIdentifier, Endpoint.Address, Endpoint.Port, TagList[?Key=='Environment'].Value|[0]]" \
+    --output text | filter_env_column "$env"
 }
 
 # ---------------------------------------------------------------------------
@@ -389,8 +430,9 @@ list_rds_instances() {
 # helpers return nothing and every EC2 code path behaves exactly as before.
 # ---------------------------------------------------------------------------
 
-# Populated once per run by discover_ecs_services. One "cluster<TAB>service<TAB>app"
-# line per App-tagged ECS service. Empty when the account has no ECS.
+# Populated once per run by discover_ecs_services. One
+# "cluster<TAB>service<TAB>app<TAB>env" line per App-tagged ECS service, env "-"
+# when the service has no Environment tag. Empty when the account has no ECS.
 ECS_SERVICES=""
 ECS_DISCOVERY_DONE=""
 
@@ -425,9 +467,13 @@ discover_ecs_services_slow() {
         --cluster "$cluster" \
         --services $batch \
         --include TAGS \
-        --query 'services[].[clusterArn, serviceName, tags[?key==`App`].value|[0]]' \
+        --query 'services[].[clusterArn, serviceName, tags[?key==`App`].value|[0], tags[?key==`Environment`].value|[0]]' \
         --output text 2>/dev/null \
-        | awk -F'\t' '$3 != "" && $3 != "None" { n = split($1, p, "/"); print p[n] "\t" $2 "\t" $3 }'
+        | awk -F'\t' -v none="$APP_NO_ENV" '$3 != "" && $3 != "None" {
+            n = split($1, p, "/")
+            env = ($4 == "" || $4 == "None") ? none : $4
+            print p[n] "\t" $2 "\t" $3 "\t" env
+          }'
     done < <(echo "$services" | xargs -n 10)
   done <<< "$clusters"
 }
@@ -446,15 +492,16 @@ discover_ecs_services() {
     --region "$region" \
     --tag-filters Key=App \
     --resource-type-filters ecs:service \
-    --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`App`].Value|[0]]' \
+    --query 'ResourceTagMappingList[].[ResourceARN, Tags[?Key==`App`].Value|[0], Tags[?Key==`Environment`].Value|[0]]' \
     --output text 2>/dev/null)
   rc=$?
 
   if [[ $rc -eq 0 ]]; then
-    ECS_SERVICES=$(echo "$raw" | awk -F'\t' '
+    ECS_SERVICES=$(echo "$raw" | awk -F'\t' -v none="$APP_NO_ENV" '
       $2 != "" && $2 != "None" {
         n = split($1, p, "/")
-        if (n >= 3) print p[n-1] "\t" p[n] "\t" $2
+        env = ($3 == "" || $3 == "None") ? none : $3
+        if (n >= 3) print p[n-1] "\t" p[n] "\t" $2 "\t" env
       }')
     return 0
   fi
@@ -469,13 +516,14 @@ discover_ecs_services() {
 
 list_ecs_apps() {
   [[ -z "$ECS_SERVICES" ]] && return 0
-  echo "$ECS_SERVICES" | awk -F'\t' 'NF >= 3 { print $3 }'
+  echo "$ECS_SERVICES" | awk -F'\t' 'NF >= 4 { print $4 "\t" $3 }' | app_labels_from_rows
 }
 
 ecs_services_for_app() {
-  local app="$1"
+  local app="$1" env="$2"
   [[ -z "$ECS_SERVICES" ]] && return 0
-  echo "$ECS_SERVICES" | awk -F'\t' -v app="$app" '$3 == app { print $1 "\t" $2 }'
+  echo "$ECS_SERVICES" | awk -F'\t' -v app="$app" -v env="$env" \
+    '$3 == app && $4 == env { print $1 "\t" $2 }'
 }
 
 # Is this EC2 instance registered as an ECS container instance? Echoes
@@ -611,8 +659,8 @@ ecs_pick_and_exec() {
 
 # Fargate / service path: every running task of the app's ECS services.
 ssh_ecs_app() {
-  local profile="$1" region="$2" app="$3"
-  echo "Fetching ECS tasks for $app..." >&2
+  local profile="$1" region="$2" app="$3" env="$4"
+  echo "Fetching ECS tasks for [$env] $app..." >&2
 
   local rows=() cluster service tasks line
   while IFS=$'\t' read -r cluster service; do
@@ -630,7 +678,7 @@ ssh_ecs_app() {
     while IFS= read -r line; do
       [[ -n "$line" ]] && rows+=("$line")
     done < <(list_ecs_task_rows "$profile" "$region" "$cluster" $tasks)
-  done < <(ecs_services_for_app "$app")
+  done < <(ecs_services_for_app "$app" "$env")
 
   ecs_pick_and_exec "$profile" "$region" "$ARG_CONTAINER" "$ARG_TASK" "${rows[@]}"
 }
@@ -1005,40 +1053,75 @@ profile_create_prompt() {
   echo "AWS CLI profile '$profile' configured."
 }
 
+# Prints the chosen "[<env>] <app>" label. <wanted-env> keeps only that
+# environment's rows. <wanted> is a whole label or a bare app name; a bare name
+# found in several environments opens the menu on just those rows.
 pick_app() {
-  local wanted="$1" account="$2" profile="$3" region="$4"
+  local wanted="$1" wanted_env="$2" account="$3" profile="$4" region="$5"
   echo "Fetching apps..." >&2
 
-  local apps=()
+  local apps=() line
   while IFS= read -r line; do
     [[ -n "$line" ]] && apps+=("$line")
-  done < <({ list_apps "$profile" "$region"; list_ecs_apps; } | sort -u | grep -v -e '^$' -e '^None$')
+  done < <({ list_apps "$profile" "$region"; list_ecs_apps; } | LC_ALL=C sort -u)
 
   if [[ ${#apps[@]} -eq 0 ]]; then
     echo "No running instances or ECS services with an App tag found." >&2
     return 1
   fi
 
+  if [[ -n "$wanted_env" ]]; then
+    local kept=() envs=()
+    for line in "${apps[@]}"; do
+      [[ "$(app_label_env "$line")" == "$wanted_env" ]] && kept+=("$line")
+      envs+=("$(app_label_env "$line")")
+    done
+    if [[ ${#kept[@]} -eq 0 ]]; then
+      echo "Error: no environment '$wanted_env' in account $account." >&2
+      echo "Available:" >&2
+      printf '  %s\n' "${envs[@]}" | LC_ALL=C sort -u >&2
+      return 1
+    fi
+    apps=("${kept[@]}")
+  fi
+
+  # A bare app name: settled if it runs in one environment, a menu of just its
+  # environments if it runs in several. A full label is matched as it stands.
+  if [[ -n "$wanted" && "$wanted" != \[* ]]; then
+    local named=()
+    for line in "${apps[@]}"; do
+      [[ "$(app_label_app "$line")" == "$wanted" ]] && named+=("$line")
+    done
+    if [[ ${#named[@]} -eq 1 ]]; then
+      wanted="${named[0]}"
+    elif [[ ${#named[@]} -gt 1 ]]; then
+      resolve_selection "" "app" "account $account" "Select application:" 1 "" "${named[@]}"
+      return
+    fi
+  fi
+
   resolve_selection "$wanted" "app" "account $account" "Select application:" 1 "" "${apps[@]}"
 }
 
 pick_instance() {
-  local wanted="$1" profile="$2" region="$3" app="$4"
-  echo "Fetching instances for $app..." >&2
+  local wanted="$1" profile="$2" region="$3" app="$4" env="$5"
+  local label
+  label=$(printf '[%s] %s' "$env" "$app")
+  echo "Fetching instances for $label..." >&2
 
   local rows=()
   while IFS= read -r line; do
     [[ -n "$line" ]] && rows+=("$line")
-  done < <(list_instances "$profile" "$region" "$app")
+  done < <(list_instances "$profile" "$region" "$app" "$env")
 
   if [[ ${#rows[@]} -eq 0 ]]; then
-    echo "No running instances found for app: $app" >&2
+    echo "No running instances found for app: $label" >&2
     return 1
   fi
 
   # Matched on the instance id or on its Name tag, whichever the user typed.
   local selected
-  selected=$(resolve_selection "$wanted" "instance" "app $app" \
+  selected=$(resolve_selection "$wanted" "instance" "app $label" \
     "Select instance:" "1,2" auto "${rows[@]}") || return 1
 
   echo "$selected" | awk '{print $1}'
@@ -1074,7 +1157,7 @@ ssh_pick_shell() {
 }
 
 cmd_ssh() {
-  parse_args "--env --app --type --instance --container --task" "--host" "$@" || exit 1
+  parse_args "--account --env --app --type --instance --container --task" "--host" "$@" || exit 1
 
   case "$ARG_TYPE" in
     ""|ec2|ecs) ;;
@@ -1089,9 +1172,9 @@ cmd_ssh() {
     exit 1
   fi
 
-  local ACCOUNT PROFILE REGION APP INSTANCE_ID
+  local ACCOUNT PROFILE REGION LABEL APP ENV INSTANCE_ID
 
-  ACCOUNT=$(pick_account "$ARG_ENV") || exit 1
+  ACCOUNT=$(pick_account "$ARG_ACCOUNT") || exit 1
   [[ -z "$ACCOUNT" ]] && exit 0
   PROFILE=$(load_config "$ACCOUNT" "profile")
   REGION=$(load_config "$ACCOUNT" "region")
@@ -1099,24 +1182,26 @@ cmd_ssh() {
   # Runs in this shell, not a subshell, so pick_app below inherits ECS_SERVICES.
   discover_ecs_services "$PROFILE" "$REGION"
 
-  APP=$(pick_app "$ARG_APP" "$ACCOUNT" "$PROFILE" "$REGION") || exit 1
-  [[ -z "$APP" ]] && exit 0
+  LABEL=$(pick_app "$ARG_APP" "$ARG_ENV" "$ACCOUNT" "$PROFILE" "$REGION") || exit 1
+  [[ -z "$LABEL" ]] && exit 0
+  APP=$(app_label_app "$LABEL")
+  ENV=$(app_label_env "$LABEL")
 
   # If the app also has ECS services, offer the choice. An app backed only by
   # EC2 skips this entirely and follows the original flow.
-  if [[ -n "$(ecs_services_for_app "$APP")" ]]; then
+  if [[ -n "$(ecs_services_for_app "$APP" "$ENV")" ]]; then
     local target="ECS task"
-    if [[ -n "$(list_instances "$PROFILE" "$REGION" "$APP")" ]]; then
+    if [[ -n "$(list_instances "$PROFILE" "$REGION" "$APP" "$ENV")" ]]; then
       target=$(ssh_pick_target)
       [[ -z "$target" ]] && exit 0
     fi
     if [[ "$target" == "ECS task" ]]; then
-      ssh_ecs_app "$PROFILE" "$REGION" "$APP"
+      ssh_ecs_app "$PROFILE" "$REGION" "$APP" "$ENV"
       return
     fi
   fi
 
-  INSTANCE_ID=$(pick_instance "$ARG_INSTANCE" "$PROFILE" "$REGION" "$APP") || exit 1
+  INSTANCE_ID=$(pick_instance "$ARG_INSTANCE" "$PROFILE" "$REGION" "$APP" "$ENV") || exit 1
   [[ -z "$INSTANCE_ID" ]] && exit 0
 
   # Autocheck: is this a plain EC2 box or an ECS container instance?
@@ -1321,13 +1406,13 @@ pick_pod_container() {
 }
 
 cmd_pod() {
-  parse_args "--env --cluster --namespace --pod --container" "" "$@" || exit 1
+  parse_args "--account --cluster --namespace --pod --container" "" "$@" || exit 1
 
   local ACCOUNT PROFILE REGION CLUSTER NAMESPACE POD CONTAINER
 
   require_kubectl
 
-  ACCOUNT=$(pick_account "$ARG_ENV") || exit 1
+  ACCOUNT=$(pick_account "$ARG_ACCOUNT") || exit 1
   [[ -z "$ACCOUNT" ]] && exit 0
   PROFILE=$(load_config "$ACCOUNT" "profile")
   REGION=$(load_config "$ACCOUNT" "region")
@@ -1350,32 +1435,34 @@ cmd_pod() {
 }
 
 cmd_db() {
-  parse_args "--env --app --db --instance" "" "$@" || exit 1
+  parse_args "--account --env --app --db --instance" "" "$@" || exit 1
 
-  local ACCOUNT PROFILE REGION APP
+  local ACCOUNT PROFILE REGION LABEL APP ENV
   local DB_IDENTIFIER RDS_HOST RDS_PORT LOCAL_PORT
   local INSTANCE_ID DB_ALIAS
 
-  ACCOUNT=$(pick_account "$ARG_ENV") || exit 1
+  ACCOUNT=$(pick_account "$ARG_ACCOUNT") || exit 1
   [[ -z "$ACCOUNT" ]] && exit 0
   PROFILE=$(load_config "$ACCOUNT" "profile")
   REGION=$(load_config "$ACCOUNT" "region")
-  APP=$(pick_app "$ARG_APP" "$ACCOUNT" "$PROFILE" "$REGION") || exit 1
-  [[ -z "$APP" ]] && exit 0
+  LABEL=$(pick_app "$ARG_APP" "$ARG_ENV" "$ACCOUNT" "$PROFILE" "$REGION") || exit 1
+  [[ -z "$LABEL" ]] && exit 0
+  APP=$(app_label_app "$LABEL")
+  ENV=$(app_label_env "$LABEL")
 
-  echo "Fetching RDS instances for $APP..." >&2
+  echo "Fetching RDS instances for $LABEL..." >&2
   local rds_rows=()
   while IFS= read -r line; do
     [[ -n "$line" ]] && rds_rows+=("$line")
-  done < <(list_rds_instances "$PROFILE" "$REGION" "$APP")
+  done < <(list_rds_instances "$PROFILE" "$REGION" "$APP" "$ENV")
 
   if [[ ${#rds_rows[@]} -eq 0 ]]; then
-    echo "No RDS instances found for app: $APP" >&2
+    echo "No RDS instances found for app: $LABEL" >&2
     exit 1
   fi
 
   local selected_rds
-  selected_rds=$(resolve_selection "$ARG_DB" "database" "app $APP" \
+  selected_rds=$(resolve_selection "$ARG_DB" "database" "app $LABEL" \
     "Select database:" 1 auto "${rds_rows[@]}") || exit 1
   [[ -z "$selected_rds" ]] && exit 0
 
@@ -1384,14 +1471,14 @@ cmd_db() {
   RDS_PORT=$(echo "$selected_rds" | awk '{print $3}')
   LOCAL_PORT=$(get_db_port "$ACCOUNT" "$DB_IDENTIFIER")
 
-  echo "Fetching jump-host for $APP..." >&2
+  echo "Fetching jump-host for $LABEL..." >&2
   if [[ -n "$ARG_INSTANCE" ]]; then
-    INSTANCE_ID=$(pick_instance "$ARG_INSTANCE" "$PROFILE" "$REGION" "$APP") || exit 1
+    INSTANCE_ID=$(pick_instance "$ARG_INSTANCE" "$PROFILE" "$REGION" "$APP" "$ENV") || exit 1
   else
-    INSTANCE_ID=$(list_instances "$PROFILE" "$REGION" "$APP" | awk 'NR==1{print $1}')
+    INSTANCE_ID=$(list_instances "$PROFILE" "$REGION" "$APP" "$ENV" | awk 'NR==1{print $1}')
   fi
   if [[ -z "$INSTANCE_ID" || "$INSTANCE_ID" == "None" ]]; then
-    echo "No running EC2 instances found for app: $APP" >&2
+    echo "No running EC2 instances found for app: $LABEL" >&2
     exit 1
   fi
 
@@ -1437,7 +1524,7 @@ cmd_config() {
       ;;
   esac
 
-  parse_args "--env --name --profile --region --access-key --secret-key --db --port" \
+  parse_args "--account --name --profile --region --access-key --secret-key --db --port" \
     "--skip-credentials --yes --delete-profile --force" "$@" || exit 1
 
   if [[ -z "$action" ]]; then
@@ -1543,9 +1630,9 @@ aws_profile_configure() {
 }
 
 config_view() {
-  if [[ -n "$ARG_ENV" ]]; then
-    pick_account "$ARG_ENV" >/dev/null || exit 1
-    jq ".[\"$ARG_ENV\"]" "$CONFIG_FILE"
+  if [[ -n "$ARG_ACCOUNT" ]]; then
+    pick_account "$ARG_ACCOUNT" >/dev/null || exit 1
+    jq ".[\"$ARG_ACCOUNT\"]" "$CONFIG_FILE"
   else
     jq '.' "$CONFIG_FILE"
   fi
@@ -1564,12 +1651,12 @@ config_view() {
     fi
     printf "  %-20s profile=%-20s key=%-16s region=%s\n" \
       "$account" "$profile" "$masked" "${cli_region:-(not set)}"
-  done < <(if [[ -n "$ARG_ENV" ]]; then echo "$ARG_ENV"; else list_accounts; fi)
+  done < <(if [[ -n "$ARG_ACCOUNT" ]]; then echo "$ARG_ACCOUNT"; else list_accounts; fi)
 }
 
 config_add() {
   local name profile region
-  name="$ARG_ENV"
+  name="$ARG_ACCOUNT"
   [[ -z "$name" ]] && read -r -p "Account name (your label for this AWS account in ssm, e.g. staging): " name
   [[ -z "$name" ]] && { echo "Aborted." >&2; return 1; }
 
@@ -1578,7 +1665,7 @@ config_add() {
   if config_account_exists "$name"; then
     if [[ -z "$ARG_FORCE" ]]; then
       echo "Error: account '$name' already exists in $CONFIG_FILE." >&2
-      echo "Use 'ssm config edit --env $name' to change it, or --force to replace it." >&2
+      echo "Use 'ssm config edit --account $name' to change it, or --force to replace it." >&2
       return 1
     fi
     echo "Replacing existing account '$name'."
@@ -1611,7 +1698,7 @@ config_add() {
 
 config_delete() {
   local account updated
-  account=$(pick_account "$ARG_ENV") || exit 1
+  account=$(pick_account "$ARG_ACCOUNT") || exit 1
   [[ -z "$account" ]] && exit 0
 
   # --db narrows the delete to a single port assignment; without it the whole
@@ -1670,7 +1757,7 @@ EOF
 config_edit() {
   local account field profile
 
-  account=$(pick_account "$ARG_ENV") || exit 1
+  account=$(pick_account "$ARG_ACCOUNT") || exit 1
   [[ -z "$account" ]] && exit 0
 
   profile=$(load_config "$account" "profile")
@@ -2011,11 +2098,12 @@ usage_for() {
 ssm ssh — Shell into an EC2 instance, an ECS container instance, or an
           ECS/Fargate container.
 
-  ssm ssh [--env <name>] [--app <name>] [--type ec2|ecs]
+  ssm ssh [--account <name>] [--env <name>] [--app <name>] [--type ec2|ecs]
           [--instance <id|Name>] [--container <name>] [--task <id>] [--host]
 
-  --env, -e     account in ~/.ssm/config.json    (default: pick from a menu)
-  --app         App tag                          (default: pick from a menu)
+  --account, -e account in ~/.ssm/config.json    (default: pick from a menu)
+  --env         Environment tag, "-" for none    (default: every environment)
+  --app         App tag, or "[<env>] <app>"      (default: pick from a menu)
   --type        ec2 or ecs, when the app has both
   --instance    EC2 instance id or Name tag; implies --type ec2
   --container   container name; implies --type ecs, or the container shell
@@ -2025,24 +2113,32 @@ ssm ssh — Shell into an EC2 instance, an ECS container instance, or an
 
 EXAMPLES
   ssm ssh                                       fully interactive
-  ssm ssh --env staging                         skips the account menu
-  ssm ssh --env staging --app adam              no prompts if the app has one instance
-  ssm ssh --env staging --instance web-01       match an EC2 Name tag
-  ssm ssh --env staging --instance i-0abc123    or an instance id
-  ssm ssh --env staging --app adam --container php-fpm
-  ssm ssh --env staging --app adam --container php-fpm --task 7d9f2a
-  ssm ssh --env staging --app adam --type ecs   when the app has both EC2 and ECS
-  ssm ssh --env staging --app adam --host       host shell on an ECS node
+  ssm ssh --account staging                     skips the account menu
+  ssm ssh -e staging --env production           only apps tagged Environment=production
+  ssm ssh -e staging --app adam                 no prompts if the app has one instance
+  ssm ssh -e staging --env production --app adam
+                                                adam's production instances only
+  ssm ssh -e staging --app '[production] adam'  the same, as the menu shows it
+  ssm ssh -e staging --instance web-01          match an EC2 Name tag
+  ssm ssh -e staging --instance i-0abc123       or an instance id
+  ssm ssh -e staging --app adam --container php-fpm
+  ssm ssh -e staging --app adam --container php-fpm --task 7d9f2a
+  ssm ssh -e staging --app adam --type ecs      when the app has both EC2 and ECS
+  ssm ssh -e staging --app adam --host          host shell on an ECS node
+
+The app menu lists each app once per Environment tag, as "[production] adam";
+"[-] adam" is one with no Environment tag. An --app found in several
+environments asks which one, unless --env settles it.
 EOF
       ;;
     pod)
       cat <<'EOF'
 ssm pod — Shell into an EKS pod via kubectl.
 
-  ssm pod [--env <name>] [--cluster <name>] [--namespace|-n <ns>]
+  ssm pod [--account <name>] [--cluster <name>] [--namespace|-n <ns>]
           [--pod <name>] [--container|-c <name>]
 
-  --env, -e       account in ~/.ssm/config.json  (default: pick from a menu)
+  --account, -e   account in ~/.ssm/config.json  (default: pick from a menu)
   --cluster       EKS cluster name
   --namespace, -n Kubernetes namespace
   --pod           pod name (running pods only)
@@ -2050,33 +2146,39 @@ ssm pod — Shell into an EKS pod via kubectl.
 
 EXAMPLES
   ssm pod                                       fully interactive
-  ssm pod --env staging                         skips the account menu
-  ssm pod --env staging --cluster sc-staging-eks
-  ssm pod --env staging -n default              skips the namespace menu
-  ssm pod --env staging -n default --pod api-7d9f
-  ssm pod --env staging -n default --pod api-7d9f -c sidecar
+  ssm pod --account staging                     skips the account menu
+  ssm pod -e staging --cluster sc-staging-eks
+  ssm pod -e staging -n default                 skips the namespace menu
+  ssm pod -e staging -n default --pod api-7d9f
+  ssm pod -e staging -n default --pod api-7d9f -c sidecar
 EOF
       ;;
     db)
       cat <<'EOF'
 ssm db — Open an RDS tunnel via SSM port forwarding.
 
-  ssm db [--env <name>] [--app <name>] [--db <identifier>] [--instance <id|Name>]
+  ssm db [--account <name>] [--env <name>] [--app <name>] [--db <identifier>]
+         [--instance <id|Name>]
 
-  --env, -e     account in ~/.ssm/config.json    (default: pick from a menu)
-  --app         App tag                          (default: pick from a menu)
+  --account, -e account in ~/.ssm/config.json    (default: pick from a menu)
+  --env         Environment tag, "-" for none    (default: every environment)
+  --app         App tag, or "[<env>] <app>"      (default: pick from a menu)
   --db          RDS DBInstanceIdentifier
   --instance    EC2 instance to tunnel through   (default: the first one found)
 
 The local port is assigned on first use and remembered in ~/.ssm/config.json.
-Change it with `ssm config edit --env <name> --db <id> --port <n>`.
+Change it with `ssm config edit --account <name> --db <id> --port <n>`.
+The database and the instance it tunnels through carry the app's Environment
+tag, so a production database is never reached through a staging instance.
 
 EXAMPLES
   ssm db                                        fully interactive
-  ssm db --env staging                          skips the account menu
-  ssm db --env staging --app adam               no prompts if the app has one database
-  ssm db --env staging --app adam --db sc-staging-adam-rds
-  ssm db --env staging --app adam --db sc-staging-adam-rds --instance web-01
+  ssm db --account staging                      skips the account menu
+  ssm db -e staging --app adam                  no prompts if the app has one database
+  ssm db -e staging --env production --app adam
+                                                adam's production database
+  ssm db -e staging --app adam --db sc-staging-adam-rds
+  ssm db -e staging --app adam --db sc-staging-adam-rds --instance web-01
 EOF
       ;;
     config)
@@ -2085,15 +2187,17 @@ ssm config — Manage account profiles and AWS CLI credentials.
 
   ssm config [view|add|edit|delete] [flags]      (no action: pick from a menu)
 
-  ssm config view   [--env <name>]
-  ssm config add    --env <name> [--profile <p>] [--region <r>]
+  ssm config view   [--account <name>]
+  ssm config add    --account <name> [--profile <p>] [--region <r>]
                     [--access-key <k>] [--secret-key -] [--skip-credentials]
                     [--force]
-  ssm config edit   --env <name> [--name <new>] [--profile <p>] [--region <r>]
+  ssm config edit   --account <name> [--name <new>] [--profile <p>] [--region <r>]
                     [--access-key <k>] [--secret-key -]
                     [--db <id> --port <n>]
-  ssm config delete --env <name> [--yes] [--delete-profile]
-  ssm config delete --env <name> --db <id> [--yes]
+  ssm config delete --account <name> [--yes] [--delete-profile]
+  ssm config delete --account <name> --db <id> [--yes]
+
+  --account, -e     the account in ~/.ssm/config.json
 
   --name            rename the account; keeps its region and db ports, and does
                     not touch the AWS CLI profile
@@ -2105,17 +2209,17 @@ ssm config — Manage account profiles and AWS CLI credentials.
 EXAMPLES
   ssm config                                    pick an action from a menu
   ssm config view                               every account
-  ssm config view --env staging                 one account
-  ssm config add --env staging --profile sc-staging --region ap-southeast-5
-  ssm config add --env staging --profile sc-staging --region ap-southeast-5 \
+  ssm config view --account staging             one account
+  ssm config add --account staging --profile sc-staging --region ap-southeast-5
+  ssm config add --account staging --profile sc-staging --region ap-southeast-5 \
     --skip-credentials                          config only, no AWS CLI setup
-  SSM_AWS_SECRET_KEY=... ssm config add --env staging --profile sc-staging \
+  SSM_AWS_SECRET_KEY=... ssm config add --account staging --profile sc-staging \
     --region ap-southeast-5 --access-key AKIA...
-  ssm config edit --env staging --region ap-southeast-1
-  ssm config edit --env staging --name stg      rename the account
-  ssm config edit --env staging --db sc-staging-adam-rds --port 15433
-  ssm config delete --env staging --db sc-staging-adam-rds --yes
-  ssm config delete --env staging --yes --delete-profile
+  ssm config edit -e staging --region ap-southeast-1
+  ssm config edit -e staging --name stg         rename the account
+  ssm config edit -e staging --db sc-staging-adam-rds --port 15433
+  ssm config delete -e staging --db sc-staging-adam-rds --yes
+  ssm config delete -e staging --yes --delete-profile
 
 Never pass a secret as a flag value -- it lands in your shell history. Set
 SSM_AWS_SECRET_KEY=... or use '--secret-key -' to read one line from stdin.
@@ -2211,14 +2315,14 @@ USAGE
   Run `ssm <command> --help` for that command's flags.
 
 FLAGS
-  ssm ssh        [--env <name>] [--app <name>] [--type ec2|ecs]
-                 [--instance <id|Name>] [--container <name>] [--task <id>]
-                 [--host]
-  ssm pod        [--env <name>] [--cluster <name>] [-n <namespace>]
+  ssm ssh        [--account <name>] [--env <name>] [--app <name>]
+                 [--type ec2|ecs] [--instance <id|Name>] [--container <name>]
+                 [--task <id>] [--host]
+  ssm pod        [--account <name>] [--cluster <name>] [-n <namespace>]
                  [--pod <name>] [-c <container>]
-  ssm db         [--env <name>] [--app <name>] [--db <identifier>]
-                 [--instance <id|Name>]
-  ssm config     [view|add|edit|delete] [--env <name>] [--name <new>]
+  ssm db         [--account <name>] [--env <name>] [--app <name>]
+                 [--db <identifier>] [--instance <id|Name>]
+  ssm config     [view|add|edit|delete] [--account <name>] [--name <new>]
                  [--profile <p>] [--region <r>] [--db <id> --port <n>]
                  [--access-key <k>] [--secret-key -] [--skip-credentials]
                  [--force] [--yes] [--delete-profile]
@@ -2226,17 +2330,21 @@ FLAGS
 
 EXAMPLES
   ssm ssh                                     fully interactive, as before
-  ssm ssh --env staging                       skips the account menu
-  ssm ssh --env staging --app adam            no prompts if the app has one instance
-  ssm ssh --env staging --app adam --container php-fpm
-  ssm ssh --env staging --instance web-01     match an EC2 Name tag or id
-  ssm db  --env staging --app adam --db sc-staging-adam-rds
-  ssm pod --env staging -n default --pod api-7d9f
-  ssm config view --env staging
-  ssm config add --env staging --profile sc-staging --region ap-southeast-5
-  ssm config edit --env staging --name stg --region ap-southeast-1
-  ssm config edit --env staging --db sc-staging-adam-rds --port 15433
-  ssm config delete --env staging --yes --delete-profile
+  ssm ssh --account staging                   skips the account menu
+  ssm ssh -e staging --app adam               no prompts if the app has one instance
+  ssm ssh -e staging --env production         only apps tagged Environment=production
+  ssm ssh -e staging --app adam --container php-fpm
+  ssm ssh -e staging --instance web-01        match an EC2 Name tag or id
+  ssm db  -e staging --app adam --db sc-staging-adam-rds
+  ssm pod -e staging -n default --pod api-7d9f
+  ssm config view --account staging
+  ssm config add --account staging --profile sc-staging --region ap-southeast-5
+  ssm config edit -e staging --name stg --region ap-southeast-1
+  ssm config edit -e staging --db sc-staging-adam-rds --port 15433
+  ssm config delete -e staging --yes --delete-profile
+
+  --account (-e) is the account in ~/.ssm/config.json; --env is the
+  Environment tag on the instances, ECS services and databases.
 
   A value that does not exist is an error listing the valid ones, so a fully
   flagged command never stops to ask a question.

@@ -8,14 +8,14 @@ description: View, add, edit and delete the AWS accounts ssm uses.
 Run `ssm config` for the menu, or name the action directly:
 
 ```sh
-ssm config view   [--env <name>]
-ssm config add    --env <name> [--profile <p>] [--region <r>]
+ssm config view   [--account <name>]
+ssm config add    --account <name> [--profile <p>] [--region <r>]
                   [--access-key <k>] [--secret-key -] [--skip-credentials]
                   [--force]
-ssm config edit   --env <name> [--name <new>] [--profile <p>] [--region <r>]
+ssm config edit   --account <name> [--name <new>] [--profile <p>] [--region <r>]
                   [--access-key <k>] [--secret-key -]
                   [--db <identifier> --port <n>]
-ssm config delete --env <name> [--db <identifier>] [--yes] [--delete-profile]
+ssm config delete --account <name> [--db <identifier>] [--yes] [--delete-profile]
 ```
 
 `edit` applies every field flag you pass in one go. `delete` still asks for
@@ -39,19 +39,20 @@ anyway.
 shell history and expose them in `ps`. Pass them one of these two ways instead:
 
 ```sh
-SSM_AWS_SECRET_KEY="$SECRET" ssm config add --env staging --profile sc-staging \
+SSM_AWS_SECRET_KEY="$SECRET" ssm config add --account staging --profile sc-staging \
   --region ap-southeast-5 --access-key AKIA...
 
-echo "$SECRET" | ssm config edit --env staging --secret-key -
+echo "$SECRET" | ssm config edit --account staging --secret-key -
 ```
 
 ## add
 
 Asks for three things, in this order. Each one has a flag that answers it instead.
 
-1. **Account name** (`--env`): your own label for one AWS account, such as
-   `staging`. It is the key in `~/.ssm/config.json`, and what you pass as
-   `--env` to every other command.
+1. **Account name** (`--account`, or `-e`): your own label for one AWS
+   account, such as `staging`. It is the key in `~/.ssm/config.json`, and what
+   you pass as `--account` to every other command. (`--env` is something else:
+   the `Environment` tag on the resources inside the account.)
 2. **AWS CLI profile** (`--profile`): the named set of access keys in `~/.aws`
    that ssm uses to call AWS. The menu lists the profiles you already have, each
    with its masked access key (`sc-staging (AKIA****WXYZ)`):
@@ -89,8 +90,8 @@ warns you if that profile does not exist yet.
   not an error.
 
 ```sh
-ssm config edit --env staging --name stg
-ssm config edit --env staging --db sc-staging-adam-rds --port 15433
+ssm config edit --account staging --name stg
+ssm config edit --account staging --db sc-staging-adam-rds --port 15433
 ```
 
 ## delete
@@ -101,5 +102,5 @@ profile from `~/.aws/credentials` and `~/.aws/config`.
 With `--db`, only that one port assignment goes and the account stays:
 
 ```sh
-ssm config delete --env staging --db sc-staging-adam-rds
+ssm config delete --account staging --db sc-staging-adam-rds
 ```

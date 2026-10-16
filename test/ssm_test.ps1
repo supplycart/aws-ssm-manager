@@ -70,10 +70,21 @@ Assert-Eq '' $ARG_HOST 'a second call clears a boolean flag'
 Invoke-Capture { Read-SsmArgs '--env' '' @() } | Out-Null
 Assert-Eq '' $ARG_ENV 'a second call clears a value flag'
 
-Invoke-Capture { Read-SsmArgs '--env --namespace --container' '' @('-e', 'stg') } | Out-Null
-Assert-Eq 'stg' $ARG_ENV '-e is --env'
-Invoke-Capture { Read-SsmArgs '--env' '' @('--account', 'stg') } | Out-Null
-Assert-Eq 'stg' $ARG_ENV '--account is --env'
+Invoke-Capture { Read-SsmArgs '--account --namespace --container' '' @('-e', 'stg') } | Out-Null
+Assert-Eq 'stg' $ARG_ACCOUNT '-e is --account'
+
+# --account and --env are two flags now: the account in config.json, and the
+# Environment tag on the resources.
+Invoke-Capture { Read-SsmArgs '--account --env' '' @('--account', 'stg', '--env', 'production') } | Out-Null
+Assert-Eq 'stg' $ARG_ACCOUNT '--account is the account'
+Assert-Eq 'production' $ARG_ENV '--env is the Environment tag'
+Invoke-Capture { Read-SsmArgs '--account --env' '' @('-e', 'stg') } | Out-Null
+Assert-Eq '' $ARG_ENV '-e no longer sets --env'
+Assert-False (Invoke-Capture { Read-SsmArgs '--account' '' @('--env', 'stg') }) '--env is refused where it is not declared'
+Assert-Contains "Unknown option '--env'" $script:LastErr '--env refused message'
+Invoke-Capture { Read-SsmArgs '--account --env' '' @('--account', 'stg') } | Out-Null
+Invoke-Capture { Read-SsmArgs '--account --env' '' @() } | Out-Null
+Assert-Eq '' $ARG_ACCOUNT '--account is cleared between calls'
 Invoke-Capture { Read-SsmArgs '--namespace' '' @('-n', 'kube-system') } | Out-Null
 Assert-Eq 'kube-system' $ARG_NAMESPACE '-n is --namespace'
 Invoke-Capture { Read-SsmArgs '--container' '' @('-c', 'php') } | Out-Null
@@ -158,6 +169,30 @@ $env:COLUMNS = '44'
 $narrow = Write-SsmTunnelBanner '127.0.0.1' '15432' 'a-very-long-database-endpoint.rds.amazonaws.com' '5432'
 Assert-True (@($narrow | ForEach-Object { $_.Length } | Sort-Object -Unique)[0] -le 44) 'COLUMNS narrows the box'
 $env:COLUMNS = $null
+
+Write-Host 'Environment tags'
+
+Assert-Eq 'production' (Get-SsmLabelEnv '[production] adam') 'label env'
+Assert-Eq 'adam' (Get-SsmLabelApp '[production] adam') 'label app'
+Assert-Eq '-' (Get-SsmLabelEnv '[-] adam') 'untagged label env'
+# The environment ends at the first "] ", so the app name is kept whole.
+Assert-Eq 'a] b' (Get-SsmLabelApp '[x] a] b') "an app name holding '] '"
+
+$labels = ConvertTo-SsmAppLabels @("staging`tadam", "None`tcharlie", "`tdora", "staging`tNone")
+Assert-Eq "[staging] adam`n[-] charlie`n[-] dora" ($labels -join "`n") 'None and empty are untagged; no App tag, no row'
+# A one-item result must stay an array, or a caller's .Count throws.
+Assert-Eq 1 (ConvertTo-SsmAppLabels @("staging`tadam")).Count 'one label is still an array'
+
+$rows = @("i-1`tweb 1`tproduction", "i-2`tweb-2`tstaging", "i-3`tweb-3`tNone")
+Assert-Eq "i-1`tweb 1" ((Select-SsmEnvRows $rows 'production') -join "`n") 'keeps one environment, drops the tag'
+Assert-Eq "i-3`tweb-3" ((Select-SsmEnvRows $rows '-') -join "`n") '- is no Environment tag'
+Assert-Eq 0 (Select-SsmEnvRows $rows 'nosuch').Count 'an environment with no rows'
+
+$script:ECS_SERVICES = @("apps`tdora-stg`tdora`tstaging", "apps`tdora-prd`tdora`tproduction", "apps`tedna`tedna`t-")
+Assert-Eq "apps`tdora-prd" ((Get-SsmEcsServicesForApp 'dora' 'production') -join "`n") 'ECS services of one environment'
+Assert-Eq "apps`tedna" ((Get-SsmEcsServicesForApp 'edna' '-') -join "`n") 'an untagged ECS service'
+Assert-Eq "[staging] dora`n[production] dora`n[-] edna" ((Get-SsmEcsApps) -join "`n") 'ECS apps are labelled'
+$script:ECS_SERVICES = @()
 
 Write-Host 'Test-SsmPort'
 
@@ -357,8 +392,9 @@ Remove-Item Env:AWS_SHARED_CREDENTIALS_FILE, Env:AWS_CONFIG_FILE
 
 Write-Host 'ConvertTo-SsmCanonicalFlag'
 
-Assert-Eq '--env' (ConvertTo-SsmCanonicalFlag '-e') '-e'
-Assert-Eq '--env' (ConvertTo-SsmCanonicalFlag '--account') '--account'
+Assert-Eq '--account' (ConvertTo-SsmCanonicalFlag '-e') '-e'
+Assert-Eq '--account' (ConvertTo-SsmCanonicalFlag '--account') '--account is its own flag'
+Assert-Eq '--env' (ConvertTo-SsmCanonicalFlag '--env') '--env is its own flag'
 Assert-Eq '--namespace' (ConvertTo-SsmCanonicalFlag '-n') '-n'
 Assert-Eq '--container' (ConvertTo-SsmCanonicalFlag '-c') '-c'
 Assert-Eq '--help' (ConvertTo-SsmCanonicalFlag '-h') '-h'

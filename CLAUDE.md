@@ -159,7 +159,7 @@ required). Config lives at `~/.ssm/config.json`. Key internals of `ssm.sh`:
 - All config writes follow the pattern: `updated=$(jq ... "$CONFIG_FILE") && echo "$updated" > "$CONFIG_FILE"`
 
 Every interactive prompt also has a flag that answers it, so a fully flagged command runs without
-stopping (`ssm ssh --env staging --app adam`). Two helpers carry this:
+stopping (`ssm ssh --account staging --env production --app adam`). Two helpers carry this:
 
 - `parse_args "<value-flags>" "<bool-flags>" "$@"` sets `ARG_<UPPER_SNAKE>` globals and rejects any
   flag the command didn't declare. Each `cmd_*` calls it first.
@@ -167,6 +167,15 @@ stopping (`ssm ssh --env staging --app adam`). Two helpers carry this:
   every `pick_*` body. Empty `<wanted>` means prompt; a value that matches nothing returns 1 after
   listing the candidates. It returns rather than exits, because callers run it inside `$( )` where
   an `exit` would only kill the subshell — hence the `|| exit 1` at every call site.
+
+`--account`/`-e` is the account in `config.json`; `--env` is the `Environment` **tag**, on `ssh`
+and `db` only. `pick_app` returns an `[<env>] <app>` label (`[-]` = untagged, `APP_NO_ENV`), and
+the caller splits it with `app_label_env`/`app_label_app` and passes the env to every later lookup
+— `list_instances`, `list_rds_instances`, `ecs_services_for_app`. Those filter on the tag after
+the AWS call (`filter_env_column`), because an EC2 filter cannot express "tag absent". A lookup
+that drops the env is how a staging pick reaches a production box. `ECS_SERVICES` rows carry the
+env as a fourth column. A bare `--app` found in several environments opens a menu of just those
+rows — the one place a flag can still prompt.
 
 A flag added to a command must also be added to `ALL_ARG_FLAGS`. That list only drives the
 clear-on-entry loop, so a flag missing from it still parses but keeps its value into the next

@@ -211,9 +211,9 @@ case_both 'an unknown flag names the command' 1 'ssm ssh' ssh --nope
 case_both 'a flag another command owns' 1 "Unknown option '--db'" ssh --db x
 case_both 'flags are case-sensitive' 1 "Unknown option '--ENV'" ssh --ENV staging
 case_both 'a missing flag value' 1 "--env" ssh --env
-case_both '--flag=value is accepted' 1 "no account 'nosuch'" ssh --env=nosuch
+case_both '--flag=value is accepted' 1 "no account 'nosuch'" ssh --account=nosuch
 case_both 'an unknown config action' 1 "unknown config action 'bogus'" config bogus
-case_both 'a config action still takes flags' 0 'staging' config view --env staging
+case_both 'a config action still takes flags' 0 'staging' config view --account staging
 
 # ---------------------------------------------------------------------------
 echo "an empty config"
@@ -235,24 +235,108 @@ unset CASE_CONFIG
 # ---------------------------------------------------------------------------
 echo "selection"
 # ---------------------------------------------------------------------------
-case_both 'an account that is not there' 1 "no account 'nosuch'" ssh --env nosuch
-case_both 'the candidates are listed' 1 'staging' ssh --env nosuch
-case_both 'an app that is not there' 1 "no app 'nosuch'" ssh --env staging --app nosuch
+case_both 'an account that is not there' 1 "no account 'nosuch'" ssh --account nosuch
+case_both 'the candidates are listed' 1 'staging' ssh --account nosuch
+case_both 'an app that is not there' 1 "no app 'nosuch'" ssh --account staging --app nosuch
 case_both 'a single instance is auto-selected' 0 'Instance: i-0adam000000000001 adam-web-1 (only one)' \
-  ssh --env staging --app adam
-case_both 'and the session is started' 0 'STUB session to i-0adam000000000001' ssh --env staging --app adam
-case_both 'a named instance' 0 'STUB session to i-0bea000000000002' ssh --env staging --app beatrice --instance bea-web-2
-case_both 'an instance that is not there' 1 "no instance 'nosuch'" ssh --env staging --app beatrice --instance nosuch
+  ssh --account staging --env staging --app adam
+case_both 'and the session is started' 0 'STUB session to i-0adam000000000001' ssh --account staging --env staging --app adam
+case_both 'a named instance' 0 'STUB session to i-0bea000000000002' ssh --account staging --app beatrice --instance bea-web-2
+case_both 'an instance that is not there' 1 "no instance 'nosuch'" ssh --account staging --app beatrice --instance nosuch
 # Cancelling is not success: bash's pick_* returns 1 and the caller exits 1.
-case_both 'cancelling a menu exits 1' 1 '' ssh --env staging --app beatrice
+case_both 'cancelling a menu exits 1' 1 '' ssh --account staging --app beatrice
+
+# ---------------------------------------------------------------------------
+echo "accounts and environments"
+# ---------------------------------------------------------------------------
+# --account (or -e) names the account in config.json; --env is the Environment
+# tag on the resources, and only ssh and db have an app list for it to narrow.
+case_both '-e names the account' 0 'Account: staging' ssh -e staging --env staging --app adam
+case_both 'pod has no --env' 1 "Unknown option '--env'" pod --env staging
+case_both 'config has no --env' 1 "Unknown option '--env'" config view --env staging
+case_both 'pod takes --account' 1 '' pod --account staging
+
+# menu_exact <name> <expected-rows> <args...>
+# The menus a run drew, row for row, in both implementations: the app list is
+# one row per "[<env>] <app>", sorted, with no duplicates.
+menu_exact() {
+  local name="$1" want="$2"
+  shift 2
+  local impl home
+  for impl in bash pwsh; do
+    [[ "$impl" == pwsh && -z "$PWSH" ]] && continue
+    home=$(new_home "$FIXTURE")
+    run "$impl" "$home" "$@"
+    if [[ "$(cat "$home/menu.log" 2>/dev/null)" == "$want" ]]; then pass; else
+      fail "$name [$impl]: the menu was not as expected" "$(diff <(printf '%s\n' "$want") "$home/menu.log" 2>&1)"
+    fi
+    rm -rf "$home"
+  done
+}
+
+menu_exact 'the app menu shows each environment' '[-] charlie
+[production] adam
+[production] dora
+[staging] adam
+[staging] beatrice
+[staging] dora' ssh --account staging
+# ssm db never looks up ECS services, so dora is not on its menu.
+menu_exact 'db shows the same app menu, EC2 only' '[-] charlie
+[production] adam
+[staging] adam
+[staging] beatrice' db --account staging
+menu_exact '--env narrows the app menu' '[production] adam
+[production] dora' ssh --account staging --env production
+menu_exact '--env - is the untagged apps' '[-] charlie' ssh --account staging --env -
+menu_exact 'an --app in several environments opens a narrowed menu' '[production] adam
+[staging] adam' ssh --account staging --app adam
+
+case_both 'an environment that is not there' 1 "no environment 'nosuch'" ssh --account staging --env nosuch
+case_both 'the environments are listed' 1 'production' ssh --account staging --env nosuch
+case_both 'an app outside the environment' 1 "no app 'beatrice'" ssh --account staging --env production --app beatrice
+case_both '--env picks the instance in that environment' 0 'STUB session to i-0adam000000000009' \
+  ssh --account staging --env production --app adam
+case_both 'and the staging one for staging' 0 'STUB session to i-0adam000000000001' \
+  ssh --account staging --env staging --app adam
+case_both '--app takes the whole menu row' 0 'STUB session to i-0adam000000000009' \
+  ssh --account staging --app '[production] adam'
+SSM_TEST_PICK=1 case_both 'the narrowed menu picks the environment' 0 'STUB session to i-0adam000000000009' \
+  ssh --account staging --app adam
+case_both 'cancelling the narrowed menu exits 1' 1 '' ssh --account staging --app adam
+case_both 'an app in one environment needs no --env' 0 'App: [-] charlie' ssh --account staging --app charlie
+case_both 'an untagged app reaches its instance' 0 'STUB session to i-0cha000000000001' \
+  ssh --account staging --app charlie
+case_both 'an instance from another environment is not offered' 1 "no instance 'adam-web-1'" \
+  ssh --account staging --env production --app adam --instance adam-web-1
+case_both 'db picks the database in that environment' 0 'Database: adam-prod-db adam-prod-db.rds.amazonaws.com 5432 (only one)' \
+  db --account staging --env production --app adam
+case_both 'and tunnels through that environment' 0 'Opening tunnel via i-0adam000000000009' \
+  db --account staging --env production --app adam
+
+# dora is ECS only: the environment has to reach the service lookup too, or a
+# staging pick lists production's tasks.
+for impl in bash pwsh; do
+  [[ "$impl" == pwsh && -z "$PWSH" ]] && continue
+  home=$(new_home "$FIXTURE")
+  SSM_TEST_CALLS="$home/calls" run "$impl" "$home" ssh --account staging --env production --app dora
+  if [[ "$RUN_RC" -eq 1 && "$RUN_OUT" == *'No running ECS tasks found.'* ]]; then pass; else
+    fail "ecs: dora with no tasks [$impl] (exit $RUN_RC)" "$RUN_OUT"
+  fi
+  if grep -q -- '--service-name dora-prd' "$home/calls" && ! grep -q -- '--service-name dora-stg' "$home/calls"; then
+    pass
+  else
+    fail "ecs: only the production service is asked for its tasks [$impl]" "$(grep 'list-tasks' "$home/calls")"
+  fi
+  rm -rf "$home"
+done
 
 # ---------------------------------------------------------------------------
 echo "ssm db"
 # ---------------------------------------------------------------------------
-case_both 'a database that is not there' 1 "no database 'nosuch'" db --env staging --app adam --db nosuch
-case_both 'an app with no databases' 1 'No RDS instances' db --env staging --app charlie
-case_both 'a bad --port is refused' 1 'port' db --env staging --app adam --port 99999
-case_both 'a bad --port is refused before AWS' 1 'port' db --env staging --app adam --port abc
+case_both 'a database that is not there' 1 "no database 'nosuch'" db --account staging --env staging --app adam --db nosuch
+case_both 'an app with no databases' 1 'No RDS instances' db --account staging --app charlie
+case_both 'a bad --port is refused' 1 'port' db --account staging --env staging --app adam --port 99999
+case_both 'a bad --port is refused before AWS' 1 'port' db --account staging --env staging --app adam --port abc
 
 # ---------------------------------------------------------------------------
 echo "ssm db and the hosts file (macOS only)"
@@ -282,7 +366,7 @@ hosts_run() {
   HOSTS_HOME=$(new_home "$FIXTURE")
   printf '%s\n' "$1" > "$HOSTS_HOME/hosts"
   RUN_OUT=$(HOME="$HOSTS_HOME" PATH="$STUBS:$PATH" SSM_HOSTS_FILE="$HOSTS_HOME/hosts" \
-    SSM_TEST_SUDO_EXEC=1 bash "$ROOT/ssm.sh" db --env staging --app adam 2>&1 </dev/null)
+    SSM_TEST_SUDO_EXEC=1 bash "$ROOT/ssm.sh" db --account staging --env staging --app adam 2>&1 </dev/null)
   RUN_RC=$?
 }
 
@@ -321,7 +405,7 @@ mkdir -p "$HOSTS_HOME/.ssm/tunnels"
 touch "$HOSTS_HOME/.ssm/tunnels/adam-db.tunnel.$LIVE_PID"
 printf '%s\n%s\n' "$HOSTS_FIXTURE" "$TAGGED" > "$HOSTS_HOME/hosts"
 RUN_OUT=$(HOME="$HOSTS_HOME" PATH="$STUBS:$PATH" SSM_HOSTS_FILE="$HOSTS_HOME/hosts" \
-  SSM_TEST_SUDO_EXEC=1 bash "$ROOT/ssm.sh" db --env staging --app adam 2>&1 </dev/null)
+  SSM_TEST_SUDO_EXEC=1 bash "$ROOT/ssm.sh" db --account staging --env staging --app adam 2>&1 </dev/null)
 if grep -qxF "$TAGGED" "$HOSTS_HOME/hosts"; then pass; else
   fail "hosts: a line another running tunnel uses is kept" "$RUN_OUT"
 fi
@@ -339,7 +423,7 @@ mkdir -p "$HOSTS_HOME/.ssm/tunnels"
 touch "$HOSTS_HOME/.ssm/tunnels/adam-db.tunnel.999999"
 printf '%s\n%s\n' "$HOSTS_FIXTURE" "$TAGGED" > "$HOSTS_HOME/hosts"
 RUN_OUT=$(HOME="$HOSTS_HOME" PATH="$STUBS:$PATH" SSM_HOSTS_FILE="$HOSTS_HOME/hosts" \
-  SSM_TEST_SUDO_EXEC=1 bash "$ROOT/ssm.sh" db --env staging --app adam 2>&1 </dev/null)
+  SSM_TEST_SUDO_EXEC=1 bash "$ROOT/ssm.sh" db --account staging --env staging --app adam 2>&1 </dev/null)
 if [[ "$(cat "$HOSTS_HOME/hosts")" == "$HOSTS_FIXTURE" ]]; then pass; else
   fail "hosts: a dead tunnel's lease does not keep the line" "$(cat "$HOSTS_HOME/hosts")"
 fi
@@ -353,8 +437,8 @@ echo "ssm pod"
 # ---------------------------------------------------------------------------
 # The kubectl stub answers with an empty cluster, so these stop at the first
 # thing that is missing -- which is the point: the message has to match.
-case_both 'pod with no EKS clusters' 1 '' pod --env staging
-case_both 'pod rejects an unknown flag' 1 "Unknown option '--instance'" pod --env staging --instance x
+case_both 'pod with no EKS clusters' 1 '' pod --account staging
+case_both 'pod rejects an unknown flag' 1 "Unknown option '--instance'" pod --account staging --instance x
 
 # ---------------------------------------------------------------------------
 echo "ssm uninstall"
@@ -368,17 +452,17 @@ case_both 'uninstall lists what it removes' 0 'uninstall removes' uninstall
 echo "ssm config writes"
 # ---------------------------------------------------------------------------
 case_config 'add an account' '{}' \
-  config add --env staging --profile sc-staging --region ap-southeast-5 --skip-credentials
+  config add --account staging --profile sc-staging --region ap-southeast-5 --skip-credentials
 case_config 'add refuses a duplicate' "$FIXTURE" \
-  config add --env staging --profile x --region y --skip-credentials
+  config add --account staging --profile x --region y --skip-credentials
 case_config 'add --force replaces one' "$FIXTURE" \
-  config add --env staging --profile x --region ap-southeast-1 --skip-credentials --force
-case_config 'rename an account' "$FIXTURE" config edit --env staging --name stg
-case_config 'set a region' "$FIXTURE" config edit --env staging --region ap-southeast-1
-case_config 'set a db port' "$FIXTURE" config edit --env staging --db adam-db --port 15500
-case_config 'set a db port on a new db' "$FIXTURE" config edit --env staging --db new-db --port 15501
-case_config 'delete a db port' "$FIXTURE" config delete --env staging --db adam-db --yes
-case_config 'delete an account' "$FIXTURE" config delete --env staging --yes
+  config add --account staging --profile x --region ap-southeast-1 --skip-credentials --force
+case_config 'rename an account' "$FIXTURE" config edit --account staging --name stg
+case_config 'set a region' "$FIXTURE" config edit --account staging --region ap-southeast-1
+case_config 'set a db port' "$FIXTURE" config edit --account staging --db adam-db --port 15500
+case_config 'set a db port on a new db' "$FIXTURE" config edit --account staging --db new-db --port 15501
+case_config 'delete a db port' "$FIXTURE" config delete --account staging --db adam-db --yes
+case_config 'delete an account' "$FIXTURE" config delete --account staging --yes
 
 # ---------------------------------------------------------------------------
 echo "key hints and what was selected"
@@ -402,12 +486,12 @@ CASE_MENU_WANT=$'staging\t(AKIA****MPLE)' SSM_TEST_PICK=2 \
 CASE_MENU_WANT=$'production\t(no such AWS profile)' SSM_TEST_PICK=2 \
   case_both 'an account whose profile is missing says so' 0 '' ssh --app adam
 SSM_TEST_PICK=2 case_both 'the picked account is shown' 0 'Account: staging (AKIA****MPLE)' ssh --app adam
-case_both 'a flagged account is shown too' 0 'Account: staging (AKIA****MPLE)' ssh --env staging --app adam
-case_both 'the app is shown' 0 'App: adam' ssh --env staging --app adam
+case_both 'a flagged account is shown too' 0 'Account: staging (AKIA****MPLE)' ssh --account staging --env staging --app adam
+case_both 'the app is shown' 0 'App: [staging] adam' ssh --account staging --env staging --app adam
 SSM_TEST_PICK=2 case_both 'a picked instance is shown' 0 'Instance: i-0bea000000000002 bea-web-2' \
-  ssh --env staging --app beatrice
+  ssh --account staging --app beatrice
 case_both 'the database is shown' 0 'Database: adam-db adam-db.rds.amazonaws.com 5432' \
-  db --env staging --app adam --db adam-db
+  db --account staging --env staging --app adam --db adam-db
 
 # ---------------------------------------------------------------------------
 echo "config add: region and profile pickers"
@@ -415,48 +499,48 @@ echo "config add: region and profile pickers"
 # ap-southeast-5 is row 2 of the fixture region list.
 CASE_MENU_WANT=$'ap-southeast-5\tAsia Pacific (Malaysia)' SSM_TEST_PICK=2 \
   case_both 'the region menu lists names' 0 'Region: ap-southeast-5 Asia Pacific (Malaysia)' \
-  config add --env qa --profile sc-staging
-SSM_TEST_PICK=2 case_config 'the picked region is written' '{}' config add --env qa --profile sc-staging
+  config add --account qa --profile sc-staging
+SSM_TEST_PICK=2 case_config 'the picked region is written' '{}' config add --account qa --profile sc-staging
 # Row 3 is eusc-de-east-1: the region without a code is not offered at all.
 SSM_TEST_PICK=3 case_both 'a region with no code yet is left out' 0 'Region: eusc-de-east-1' \
-  config add --env qa --profile sc-staging
+  config add --account qa --profile sc-staging
 # Nothing listening on port 9: the list cannot be fetched, so it asks for the
 # code instead, and end-of-input is not an answer.
 SSM_REGIONS_URL=http://127.0.0.1:9/data.json \
   case_both 'an unreachable region list falls back to typing' 1 'Could not fetch the region list' \
-  config add --env qa --profile sc-staging
+  config add --account qa --profile sc-staging
 case_both 'a sovereign-cloud region code is accepted' 0 "Account 'qa' added" \
-  config add --env qa --profile sc-staging --region eusc-de-east-1
+  config add --account qa --profile sc-staging --region eusc-de-east-1
 case_both 'a bad --region is refused' 1 "'bogus' is not an AWS region code" \
-  config add --env qa --profile sc-staging --region bogus
+  config add --account qa --profile sc-staging --region bogus
 case_both 'a region newer than the table is accepted' 0 "Account 'qa' added" \
-  config add --env qa --profile sc-staging --region xx-future-9
+  config add --account qa --profile sc-staging --region xx-future-9
 case_both 'edit refuses a bad --region too' 1 "'bogus' is not an AWS region code" \
-  config edit --env staging --region bogus
-case_config 'and changes nothing' "$FIXTURE" config edit --env staging --region bogus
+  config edit --account staging --region bogus
+case_config 'and changes nothing' "$FIXTURE" config edit --account staging --region bogus
 
 case_both 'a bad --profile is refused' 1 "'bad name' is not a valid AWS CLI profile name" \
-  config add --env qa --profile 'bad name' --region ap-southeast-1
+  config add --account qa --profile 'bad name' --region ap-southeast-1
 case_both 'an existing profile is reused without asking' 0 \
   "Using existing AWS CLI profile 'sc-staging' (AKIA****MPLE)." \
-  config add --env qa --profile sc-staging --region ap-southeast-1
+  config add --account qa --profile sc-staging --region ap-southeast-1
 # Sorted: default, sc-staging, sso-dev.
 CASE_MENU_WANT=$'sso-dev\t(no access key)' SSM_TEST_PICK=1 \
   case_both 'the profile menu lists every profile' 0 "Profile: default (AKIA****WXYZ)" \
-  config add --env qa --region ap-southeast-1
+  config add --account qa --region ap-southeast-1
 SSM_TEST_QUERY=brand-new case_both 'a typed name is a new profile' 1 'Profile: brand-new (new)' \
-  config add --env qa --region ap-southeast-1
+  config add --account qa --region ap-southeast-1
 SSM_TEST_QUERY=brand-new case_both 'a new profile asks for its keys' 1 'Aborted: no access key given.' \
-  config add --env qa --region ap-southeast-1
+  config add --account qa --region ap-southeast-1
 SSM_TEST_QUERY=brand-new case_config 'and nothing is written without them' '{}' \
-  config add --env qa --region ap-southeast-1
+  config add --account qa --region ap-southeast-1
 SSM_TEST_QUERY=brand-new SSM_AWS_SECRET_KEY=s3cret \
   case_both 'a new profile is created' 0 "AWS CLI profile 'brand-new' configured." \
-  config add --env qa --region ap-southeast-1 --access-key AKIANEWKEY000000WXYZ
+  config add --account qa --region ap-southeast-1 --access-key AKIANEWKEY000000WXYZ
 SSM_TEST_QUERY='bad name' case_both 'a typed name is validated' 1 'not a valid AWS CLI profile name' \
-  config add --env qa --region ap-southeast-1
+  config add --account qa --region ap-southeast-1
 case_both 'skipping credentials for a missing profile warns' 0 "does not exist yet" \
-  config add --env qa --profile nope --region ap-southeast-1 --skip-credentials
+  config add --account qa --profile nope --region ap-southeast-1 --skip-credentials
 unset CASE_AWS_CREDENTIALS CASE_AWS_CONFIG
 
 echo ""

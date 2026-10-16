@@ -5,8 +5,9 @@ description: Open a tunnel to an RDS database through SSM port forwarding.
 
 # ssm db
 
-1. Select environment
-2. Select application
+1. Select account
+2. Select application, listed as `[<environment>] <app>` from the `App` and
+   `Environment` tags, the same menu as [`ssm ssh`](/commands/ssh#environments)
 3. Select RDS instance (auto-selected if only one)
 4. A stable local port is assigned on first use and saved to `config.json`
 5. Tunnel opens, and a banner prints the host and port to connect to
@@ -49,9 +50,14 @@ your DB client once.
 
 ## Flags
 
-`--env`, `--app`, `--db <identifier>`. The jump host is the first running
-instance of the app; `--instance <id|Name>` picks a different one.
+`--account` (or `-e`), `--env`, `--app`, `--db <identifier>`, with `--env` and
+`--app` working as they do for [`ssm ssh`](/commands/ssh#flags). The database
+and the jump host both carry the app's `Environment` tag, so a production
+database is never reached through a staging instance. The jump host is the
+first running instance of the app in that environment; `--instance <id|Name>`
+picks a different one.
 
 ```sh
-ssm db --env staging --app adam --db sc-staging-adam-rds
+ssm db --account staging --env production --app adam
+ssm db -e staging --app adam --db sc-staging-adam-rds
 ```

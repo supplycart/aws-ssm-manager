@@ -54,13 +54,23 @@ parse_args "--env --app" "" --env staging
 assert_eq "" "$ARG_APP" "unset flags are cleared between calls"
 assert_eq "" "$ARG_HOST" "boolean flags are cleared between calls"
 
-parse_args "--env --namespace --container" "" -e staging -n default -c web
-assert_eq "staging" "$ARG_ENV" "alias -e"
+parse_args "--account --namespace --container" "" -e staging -n default -c web
+assert_eq "staging" "$ARG_ACCOUNT" "alias -e"
 assert_eq "default" "$ARG_NAMESPACE" "alias -n"
 assert_eq "web" "$ARG_CONTAINER" "alias -c"
 
-parse_args "--env" "" --account staging
-assert_eq "staging" "$ARG_ENV" "alias --account"
+# --account and --env are two flags now: the account in config.json, and the
+# Environment tag on the resources.
+parse_args "--account --env" "" --account staging --env production
+assert_eq "staging" "$ARG_ACCOUNT" "--account is the account"
+assert_eq "production" "$ARG_ENV" "--env is the Environment tag"
+parse_args "--account --env" "" -e staging
+assert_eq "" "$ARG_ENV" "-e no longer sets --env"
+assert_status 1 "--env is refused where it is not declared" parse_args "--account" "" --env staging
+assert_contains "Unknown option '--env'" "$LAST_OUTPUT" "--env refused message"
+parse_args "--account --env" "" --account staging --env production
+parse_args "--account --env" ""
+assert_eq "" "$ARG_ACCOUNT" "--account is cleared between calls"
 
 assert_status 1 "unknown flag" parse_args "--env" "" --nope x
 assert_contains "Unknown option" "$LAST_OUTPUT" "unknown flag message"
@@ -176,8 +186,8 @@ assert_contains "adam-prod.abc123.ap-southeast-1.rds.amazonaws.com:5432" "$wide"
 
 echo "config flags"
 
-parse_args "--env --name --db --port" "--force" \
-  --env staging --name stg --db sc-adam-rds --port 15433 --force
+parse_args "--account --name --db --port" "--force" \
+  --account staging --name stg --db sc-adam-rds --port 15433 --force
 assert_eq "stg" "$ARG_NAME" "value flag --name"
 assert_eq "sc-adam-rds" "$ARG_DB" "value flag --db"
 assert_eq "15433" "$ARG_PORT" "value flag --port"
@@ -188,11 +198,33 @@ assert_status 1 "--port is not an ssh flag" parse_args "--env --app" "" --port 1
 
 # ALL_ARG_FLAGS drives the clearing loop, so a flag missing from that list keeps
 # its value into the next call.
-parse_args "--env --name --port" "--force" --env staging --name stg --port 15433 --force
-parse_args "--env --name --port" "--force" --env staging
+parse_args "--account --name --port" "--force" --account staging --name stg --port 15433 --force
+parse_args "--account --name --port" "--force" --account staging
 assert_eq "" "$ARG_NAME" "--name is cleared between calls"
 assert_eq "" "$ARG_PORT" "--port is cleared between calls"
 assert_eq "" "$ARG_FORCE" "--force is cleared between calls"
+
+echo "Environment tags"
+
+assert_eq "production" "$(app_label_env '[production] adam')" "label env"
+assert_eq "adam" "$(app_label_app '[production] adam')" "label app"
+assert_eq "-" "$(app_label_env '[-] adam')" "untagged label env"
+# The environment ends at the first "] ", so the app name is kept whole.
+assert_eq "a] b" "$(app_label_app '[x] a] b')" "an app name holding '] '"
+
+rows=$(printf 'staging\tadam\nNone\tcharlie\n\tdora\nstaging\tNone\n' | app_labels_from_rows)
+assert_eq $'[staging] adam\n[-] charlie\n[-] dora' "$rows" "None and empty are untagged; no App tag, no row"
+
+rows=$(printf 'i-1\tweb 1\tproduction\ni-2\tweb-2\tstaging\ni-3\tweb-3\tNone\n')
+assert_eq $'i-1\tweb 1' "$(printf '%s\n' "$rows" | filter_env_column production)" "keeps one environment, drops the tag"
+assert_eq $'i-3\tweb-3' "$(printf '%s\n' "$rows" | filter_env_column -)" "- is no Environment tag"
+assert_eq "" "$(printf '%s\n' "$rows" | filter_env_column nosuch)" "an environment with no rows"
+
+ECS_SERVICES=$'apps\tdora-stg\tdora\tstaging\napps\tdora-prd\tdora\tproduction\napps\tedna\tedna\t-'
+assert_eq $'apps\tdora-prd' "$(ecs_services_for_app dora production)" "ECS services of one environment"
+assert_eq $'apps\tedna' "$(ecs_services_for_app edna -)" "an untagged ECS service"
+assert_eq $'[staging] dora\n[production] dora\n[-] edna' "$(list_ecs_apps)" "ECS apps are labelled"
+ECS_SERVICES=""
 
 echo "validate_port"
 
